@@ -85,11 +85,25 @@ SET_TARGET_PROPERTIES(libcreaterepo_c PROPERTIES
                       VERSION "${VERSION}"
                       COMPILE_DEFINITIONS "G_LOG_DOMAIN=\"${G_LOG_DOMAIN}\"")
 
+if(OS2)
+    set_target_properties(libcreaterepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}"
+        TARGET_SHORT crtrepo)
+endif()
+
 ADD_EXECUTABLE(createrepo_c createrepo_c.c cmd_parser.c)
 TARGET_LINK_LIBRARIES(createrepo_c
                         libcreaterepo_c
                         ${GLIB2_LIBRARIES}
                         ${GTHREAD2_LIBRARIES})
+if(OS2)
+    set_target_properties(createrepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}")
+endif()
 
 ADD_EXECUTABLE(mergerepo_c mergerepo_c.c)
 TARGET_LINK_LIBRARIES(mergerepo_c
@@ -98,17 +112,38 @@ TARGET_LINK_LIBRARIES(mergerepo_c
                         ${GTHREAD2_LIBRARIES}
                         ${LIBMODULEMD_LIBRARIES})
 
+if(OS2)
+    set_target_properties(mergerepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}")
+endif()
+
 ADD_EXECUTABLE(modifyrepo_c modifyrepo_c.c)
 TARGET_LINK_LIBRARIES(modifyrepo_c
                         libcreaterepo_c
                         ${GLIB2_LIBRARIES}
                         ${GTHREAD2_LIBRARIES})
 
+if(OS2)
+    set_target_properties(modifyrepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}")
+endif()
+
 ADD_EXECUTABLE(sqliterepo_c sqliterepo_c.c)
 TARGET_LINK_LIBRARIES(sqliterepo_c
                         libcreaterepo_c
                         ${GLIB2_LIBRARIES}
                         ${GTHREAD2_LIBRARIES})
+
+if(OS2)
+    set_target_properties(sqliterepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}")
+endif()
 
 CONFIGURE_FILE("createrepo_c.pc.cmake" "${CMAKE_SOURCE_DIR}/src/createrepo_c.pc" @ONLY)
 CONFIGURE_FILE("version.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/version.h" @ONLY)
