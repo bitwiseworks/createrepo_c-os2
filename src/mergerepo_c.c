@@ -1624,7 +1624,11 @@ dump_merged_metadata(GHashTable *merged_hashtable,
         gchar *repomd_path = g_strconcat(cmd_options->tmp_out_repo,
                                          "repomd.xml",
                                          NULL);
+#ifndef __OS2__
         FILE *frepomd = fopen(repomd_path, "w");
+#else
+        FILE *frepomd = fopen(repomd_path, "wb");
+#endif
         if (frepomd) {
             fputs(repomd_xml, frepomd);
             fclose(frepomd);

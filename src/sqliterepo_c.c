@@ -581,7 +581,11 @@ gen_new_repomd(const gchar *tmp_out_repo,
 
     // Write the repomd.xml
     _cleanup_file_fclose_ FILE *f_repomd = NULL;
+#ifndef __OS2__
     if (!(f_repomd = fopen(repomd_path, "w"))) {
+#else
+    if (!(f_repomd = fopen(repomd_path, "wb"))) {
+#endif
         g_set_error(err, CREATEREPO_C_ERROR, CRE_IO,
                     "Cannot open %s: %s", repomd_path, g_strerror(errno));
         return FALSE;

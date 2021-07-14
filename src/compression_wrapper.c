@@ -389,7 +389,9 @@ cr_sopen(const char *filename,
     switch (type) {
 
         case (CR_CW_NO_COMPRESSION): // ---------------------------------------
+#ifndef __OS2__
             mode_str = (mode == CR_CW_MODE_WRITE) ? "w" : "r";
+#endif
             file->FILE = (void *) fopen(filename, mode_str);
             if (!file->FILE)
                 g_set_error(err, ERR_DOMAIN, CRE_IO,

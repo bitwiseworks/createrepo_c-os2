@@ -1291,7 +1291,11 @@ cr_write_to_file(GError **err, gchar *filename, const char *format, ...)
     if (!format)
         return TRUE;
 
+#ifndef __OS2__
     FILE *f = fopen(filename, "w");
+#else
+    FILE *f = fopen(filename, "wb");
+#endif
     if (!f) {
         g_set_error(err, ERR_DOMAIN, CRE_IO,
                     "Cannot open %s: %s", filename, g_strerror(errno));

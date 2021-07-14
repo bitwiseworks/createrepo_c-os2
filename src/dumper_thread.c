@@ -243,7 +243,11 @@ get_checksum(const char *filename,
         free(key);
 
         // Try to load checksum
+#ifndef __OS2__
         FILE *f = fopen(cachefn, "r");
+#else
+        FILE *f = fopen(cachefn, "rb");
+#endif
         if (f) {
             char buf[CACHEDCHKSUM_BUFFER_LEN];
             size_t readed = fread(buf, 1, CACHEDCHKSUM_BUFFER_LEN, f);

@@ -680,7 +680,11 @@ main(int argc, char **argv)
     // Open package list
     FILE *output_pkg_list = NULL;
     if (cmd_options->read_pkgs_list) {
+#ifndef __OS2__
         output_pkg_list = fopen(cmd_options->read_pkgs_list, "w");
+#else
+        output_pkg_list = fopen(cmd_options->read_pkgs_list, "wb");
+#endif
         if (!output_pkg_list) {
             g_critical("Cannot open \"%s\" for writing: %s",
                        cmd_options->read_pkgs_list, g_strerror(errno));
@@ -1970,7 +1974,11 @@ deltaerror:
 
     // Write repomd.xml
     gchar *repomd_path = g_strconcat(tmp_out_repo, "repomd.xml", NULL);
+#ifndef __OS2__
     FILE *frepomd = fopen(repomd_path, "w");
+#else
+    FILE *frepomd = fopen(repomd_path, "wb");
+#endif
     if (!frepomd) {
         g_critical("Cannot open %s: %s", repomd_path, g_strerror(errno));
         exit(EXIT_FAILURE);
