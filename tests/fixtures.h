@@ -31,6 +31,7 @@
 #define TEST_REPO_01                    TEST_DATA_PATH"repo_01/"
 #define TEST_REPO_02                    TEST_DATA_PATH"repo_02/"
 #define TEST_REPO_03                    TEST_DATA_PATH"repo_03/"
+#define TEST_REPO_04                    TEST_DATA_PATH"repo_04/"
 #define TEST_REPO_KOJI_01               TEST_DATA_PATH"repo_koji_01/"
 #define TEST_REPO_KOJI_02               TEST_DATA_PATH"repo_koji_02/"
 #define TEST_FILES_PATH                 TEST_DATA_PATH"test_files/"
@@ -62,6 +63,14 @@
 #define TEST_REPO_03_OTHER      TEST_REPO_03"repodata/ef3e20691954c3d1318ec3071a982da339f4ed76967ded668b795c9e070aaab6-other.xml.gz"
 #define TEST_REPO_03_MODULEMD   TEST_REPO_03"repodata/a850093e240506c728d6ce26a6fc51d6a7fe10730c67988d13afa7dd82df82d5-modules.yaml.xz"
 
+// REPO_04 is a copy of REPO_02 with filelists_ext metadata
+#define TEST_REPO_04_REPOMD        TEST_REPO_04"repodata/repomd.xml"
+#define TEST_REPO_04_PRIMARY       TEST_REPO_04"repodata/6a5f64dd82a126a161657764fe8f4b4092c0a3b61b9a34bde2af89dc1df112a1-primary.xml.gz"
+#define TEST_REPO_04_FILELISTS     TEST_REPO_04"repodata/d7b8b1b6caa124aa17e4c6a1867e50e6893791ade0ebe212ab6f536695b5ce84-filelists.xml.gz"
+#define TEST_REPO_04_FILELISTS_EXT TEST_REPO_04"repodata/d1c632d489f1c72b68b5c0d5de38ed1cb5c7a521380a88bed86771d39fb19538-filelists-ext.xml.gz"
+#define TEST_REPO_04_OTHER         TEST_REPO_04"repodata/6d0101044d9b4683e4ddc76491b3eb2228cddaace9e1d148c5eb138de9f71c17-other.xml.gz"
+
+
 #define TEST_REPO_WITH_ADDITIONAL_METADATA_REPOMD                TEST_REPO_WITH_ADDITIONAL_METADATA"repodata/repomd.xml"
 #define TEST_REPO_WITH_ADDITIONAL_METADATA_PRIMARY_XML_GZ        TEST_REPO_WITH_ADDITIONAL_METADATA"repodata/490a2a494a3827b8a356f728ac36bc02fb009b0eaea173c890e727bb54219037-primary.xml.gz"
 #define TEST_REPO_WITH_ADDITIONAL_METADATA_PRIMARY_SQLITE_BZ2    TEST_REPO_WITH_ADDITIONAL_METADATA"repodata/1e12239bf5cb07ec73c74482c35e80dabe30dbe2fdd57bd9e557d987cbacc8c2-primary.sqlite.bz2"
@@ -85,6 +94,11 @@
 #define TEST_MRF_UE_OTH_00      TEST_MODIFIED_REPO_FILES_PATH"unknown_element_00-other.xml"
 #define TEST_MRF_UE_OTH_01      TEST_MODIFIED_REPO_FILES_PATH"unknown_element_01-other.xml"
 #define TEST_MRF_UE_OTH_02      TEST_MODIFIED_REPO_FILES_PATH"unknown_element_02-other.xml"
+#define TEST_LONG_PRIMARY       TEST_MODIFIED_REPO_FILES_PATH"long_primary.xml"
+#define TEST_DIFF_ORDER_FILELISTS TEST_MODIFIED_REPO_FILES_PATH"repo_02_different_order_filelists.xml"
+#define TEST_PRIMARY_MULTI_WARN_00 TEST_MODIFIED_REPO_FILES_PATH"multiple_warnings_00-primary.xml"
+#define TEST_FILELISTS_MULTI_WARN_00 TEST_MODIFIED_REPO_FILES_PATH"multiple_warnings_00-filelists.xml"
+#define TEST_OTHER_MULTI_WARN_00 TEST_MODIFIED_REPO_FILES_PATH"multiple_warnings_00-other.xml"
 
 // Test files
 
@@ -98,8 +112,10 @@
 
 // Repodata snippets
 
-#define TEST_FILELISTS_SNIPPET_01   TEST_REPODATA_SNIPPETS"filelists_snippet_01.xml"
-#define TEST_FILELISTS_SNIPPET_02   TEST_REPODATA_SNIPPETS"filelists_snippet_02.xml"
+#define TEST_FILELISTS_SNIPPET_01     TEST_REPODATA_SNIPPETS"filelists_snippet_01.xml"
+#define TEST_FILELISTS_SNIPPET_02     TEST_REPODATA_SNIPPETS"filelists_snippet_02.xml"
+#define TEST_FILELISTS_EXT_SNIPPET_01 TEST_REPODATA_SNIPPETS"filelists_ext_snippet_01.xml"
+#define TEST_FILELISTS_EXT_SNIPPET_02 TEST_REPODATA_SNIPPETS"filelists_ext_snippet_02.xml"
 
 // Other
 

@@ -21,6 +21,7 @@
 #define __C_CREATEREPOLIB_LOCATE_METADATA_H__
 
 #include <glib.h>
+#include "repomd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,9 +37,11 @@ extern "C" {
 struct cr_MetadataLocation {
     char *pri_xml_href;         /*!< path to primary.xml */
     char *fil_xml_href;         /*!< path to filelists.xml */
+    char *fex_xml_href;         /*!< path to filelists-ext.xml */
     char *oth_xml_href;         /*!< path to other.xml */
     char *pri_sqlite_href;      /*!< path to primary.sqlite */
     char *fil_sqlite_href;      /*!< path to filelists.sqlite */
+    char *fex_sqlite_href;      /*!< path to filelists-ext.sqlite */
     char *oth_sqlite_href;      /*!< path to other.sqlite */
     GSList *additional_metadata; /*!< list of cr_Metadatum: paths 
                                       to additional metadata such 
@@ -50,6 +53,7 @@ struct cr_MetadataLocation {
     int  tmp;                   /*!< if true - metadata were downloaded and
                                      will be removed during
                                      cr_metadata_location_free*/
+    cr_Repomd *repomd_data;     /*!< parsed repomd */
 };
 
 /** Structure representing additional metadata location and type.

@@ -92,10 +92,11 @@ read_header(const char *filename, Header *hdr, GError **err)
 
     FD_t fd = Fopen(filename, "r.ufdio");
     if (!fd) {
+        int fopen_error = errno;
         g_warning("%s: Fopen of %s failed %s",
-                  __func__, filename, g_strerror(errno));
+                  __func__, filename, g_strerror(fopen_error));
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Fopen failed: %s", g_strerror(errno));
+                    "Fopen failed: %s", g_strerror(fopen_error));
         return FALSE;
     }
 
@@ -176,10 +177,11 @@ cr_package_from_rpm(const char *filename,
     if (!stat_buf) {
         struct stat stat_buf_own;
         if (stat(filename, &stat_buf_own) == -1) {
+            int stat_error = errno;
             g_warning("%s: stat(%s) error (%s)", __func__,
-                      filename, g_strerror(errno));
+                      filename, g_strerror(stat_error));
             g_set_error(err,  ERR_DOMAIN, CRE_IO, "stat(%s) failed: %s",
-                        filename, g_strerror(errno));
+                        filename, g_strerror(stat_error));
             goto errexit;
         }
         pkg->time_file    = stat_buf_own.st_mtime;
@@ -190,14 +192,14 @@ cr_package_from_rpm(const char *filename,
     }
 
     // Compute checksum
-    char *checksum = cr_checksum_file(filename, checksum_type, &tmp_err);
+    gchar *checksum = cr_checksum_file(filename, checksum_type, &tmp_err);
     if (!checksum) {
         g_propagate_prefixed_error(err, tmp_err,
                                    "Error while checksum calculation: ");
         goto errexit;
     }
     pkg->pkgId = cr_safe_string_chunk_insert(pkg->chunk, checksum);
-    free(checksum);
+    g_free(checksum);
 
     // Get header range
     struct cr_HeaderRangeStruct hdr_r = cr_get_header_byte_range(filename,
@@ -235,9 +237,10 @@ cr_xml_from_rpm(const char *filename,
     assert(filename);
     assert(!err || *err == NULL);
 
-    result.primary   = NULL;
-    result.filelists = NULL;
-    result.other     = NULL;
+    result.primary       = NULL;
+    result.filelists     = NULL;
+    result.filelists_ext = NULL;
+    result.other         = NULL;
 
     pkg = cr_package_from_rpm(filename,
                               checksum_type,
@@ -251,6 +254,42 @@ cr_xml_from_rpm(const char *filename,
         return result;
 
     result = cr_xml_dump(pkg, err);
+    cr_package_free(pkg);
+    return result;
+}
+
+struct cr_XmlStruct
+cr_xml_from_rpm_ext(const char *filename,
+                    cr_ChecksumType checksum_type,
+                    const char *location_href,
+                    const char *location_base,
+                    int changelog_limit,
+                    struct stat *stat_buf,
+                    GError **err)
+{
+    cr_Package *pkg;
+    struct cr_XmlStruct result;
+
+    assert(filename);
+    assert(!err || *err == NULL);
+
+    result.primary       = NULL;
+    result.filelists     = NULL;
+    result.filelists_ext = NULL;
+    result.other         = NULL;
+
+    pkg = cr_package_from_rpm(filename,
+                              checksum_type,
+                              location_href,
+                              location_base,
+                              changelog_limit,
+                              stat_buf,
+                              CR_HDRR_NONE,
+                              err);
+    if (!pkg)
+        return result;
+
+    result = cr_xml_dump_ext(pkg, err);
     cr_package_free(pkg);
     return result;
 }

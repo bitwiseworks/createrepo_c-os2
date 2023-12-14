@@ -102,6 +102,9 @@ sqliterepocmdoptions_free(SqliterepoCmdOptions *options)
 CR_DEFINE_CLEANUP_FUNCTION0(SqliterepoCmdOptions*, cr_local_sqliterepocmdoptions_free, sqliterepocmdoptions_free)
 #define _cleanup_sqliterepocmdoptions_free_ __attribute__ ((cleanup(cr_local_sqliterepocmdoptions_free)))
 
+CR_DEFINE_CLEANUP_FUNCTION0(cr_Repomd*, cr_local_repomd_free, cr_repomd_free)
+#define _cleanup_repomd_free_ __attribute__ ((cleanup(cr_local_repomd_free)))
+
 /**
  * Parse commandline arguments for sqliterepo utility
  */
@@ -528,12 +531,12 @@ gen_new_repomd(const gchar *tmp_out_repo,
     cr_RepomdRecord *oth_db_rec = NULL;
     gboolean simple_md_filename = FALSE;
 
-    // Create copy of repomd
-    repomd = cr_repomd_copy(in_repomd);
-
     // Check if a unique md filename should be used or not
     if (!uses_simple_md_filename(in_repomd, &simple_md_filename, err))
         return FALSE;
+
+    // Create copy of repomd
+    repomd = cr_repomd_copy(in_repomd);
 
     // Prepend checksum if unique md filename should be used
     if (!simple_md_filename) {
@@ -572,8 +575,10 @@ gen_new_repomd(const gchar *tmp_out_repo,
     // Dump the repomd.xml content
     _cleanup_free_ gchar *repomd_content = NULL;
     repomd_content = cr_xml_dump_repomd(repomd, err);
-    if (!repomd_content)
+    if (!repomd_content) {
+        cr_repomd_free(repomd);
         return FALSE;
+    }
 
     // Prepare output repomd.xml path
     _cleanup_free_ gchar *repomd_path = NULL;
@@ -588,6 +593,7 @@ gen_new_repomd(const gchar *tmp_out_repo,
 #endif
         g_set_error(err, CREATEREPO_C_ERROR, CRE_IO,
                     "Cannot open %s: %s", repomd_path, g_strerror(errno));
+        cr_repomd_free(repomd);
         return FALSE;
     }
 
@@ -638,10 +644,8 @@ move_results(const gchar *tmp_out_repo,
         dst_path = g_build_filename(in_repo, filename, NULL);
 
         // Move the file
-        if (g_rename(src_path, dst_path) == -1) {
-            g_set_error(err, CREATEREPO_C_ERROR, CRE_IO,
-                        "Cannot move: %s to: %s: %s",
-                        src_path, dst_path, g_strerror(errno));
+        if (!cr_move_recursive(src_path, dst_path, &tmp_err)) {
+            g_propagate_error(err, tmp_err);
             return FALSE;
         }
     }
@@ -652,10 +656,8 @@ move_results(const gchar *tmp_out_repo,
         _cleanup_free_ gchar *dst_path = NULL;
         src_path = g_build_filename(tmp_out_repo, "repomd.xml", NULL);
         dst_path = g_build_filename(in_repo, "repomd.xml", NULL);
-        if (g_rename(src_path, dst_path) == -1) {
-            g_set_error(err, CREATEREPO_C_ERROR, CRE_IO,
-                        "Cannot move: %s to: %s: %s",
-                        src_path, dst_path, g_strerror(errno));
+        if (!cr_move_recursive(src_path, dst_path, &tmp_err)) {
+            g_propagate_error(err, tmp_err);
             return FALSE;
         }
     }
@@ -715,11 +717,9 @@ generate_sqlite_from_xml(const gchar *path,
     _cleanup_free_ gchar *in_dir       = NULL;  // path/to/repo/
     _cleanup_free_ gchar *in_repo      = NULL;  // path/to/repo/repodata/
     _cleanup_free_ gchar *out_dir      = NULL;  // path/to/out_repo/
-    _cleanup_free_ gchar *out_repo     = NULL;  // path/to/out_repo/repodata/
     _cleanup_free_ gchar *tmp_out_repo = NULL;  // usually path/to/out_repo/.repodata/
     _cleanup_free_ gchar *lock_dir     = NULL;  // path/to/out_repo/.repodata/
     gboolean ret;
-    GError *tmp_err = NULL;
 
     // Check if input dir exists
     in_dir = cr_normalize_dir_path(path);
@@ -732,9 +732,6 @@ generate_sqlite_from_xml(const gchar *path,
     // Set other paths
     in_repo         = g_build_filename(in_dir, "repodata/", NULL);
     out_dir         = g_strdup(in_dir);
-    out_repo        = g_strdup(in_repo);
-    lock_dir        = g_build_filename(out_dir, ".repodata/", NULL);
-    tmp_out_repo    = g_build_filename(out_dir, ".repodata/", NULL);
 
     // Block signals that terminates the process
     if (!cr_block_terminating_signals(err))
@@ -763,6 +760,7 @@ generate_sqlite_from_xml(const gchar *path,
     if (!md_loc || !md_loc->repomd) {
         g_set_error(err, CREATEREPO_C_ERROR, CRE_NOFILE,
                     "repomd.xml doesn't exist");
+        cr_metadatalocation_free(md_loc);
         return FALSE;
     }
 
@@ -778,7 +776,7 @@ generate_sqlite_from_xml(const gchar *path,
 
     // Parse repomd.xml
     int rc;
-    cr_Repomd *repomd = cr_repomd_new();
+    _cleanup_repomd_free_ cr_Repomd *repomd = cr_repomd_new();
 
     rc = cr_xml_parse_repomd(repomd_path,
                              repomd,
@@ -879,14 +877,19 @@ generate_sqlite_from_xml(const gchar *path,
         return FALSE;
 
     fil_db = cr_db_open_filelists(fil_db_filename, err);
-    assert(fil_db || tmp_err);
-    if (!fil_db)
+    assert(fil_db);
+    if (!fil_db) {
+        cr_db_close(pri_db, NULL);
         return FALSE;
+    }
 
     oth_db = cr_db_open_other(oth_db_filename, err);
-    assert(oth_db || tmp_err);
-    if (!oth_db)
+    assert(oth_db);
+    if (!oth_db) {
+        cr_db_close(pri_db, NULL);
+        cr_db_close(fil_db, NULL);
         return FALSE;
+    }
 
     // XML to Sqlite
     ret = xml_to_sqlite(pri_xml_path,
@@ -971,7 +974,6 @@ generate_sqlite_from_xml(const gchar *path,
     g_rmdir(tmp_out_repo);
 
     // Clean up
-    cr_repomd_free(repomd);
     cr_repomd_record_free(pri_db_rec);
     cr_repomd_record_free(fil_db_rec);
     cr_repomd_record_free(oth_db_rec);

@@ -20,7 +20,6 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
-#include <magic.h>
 #include <assert.h>
 #include <errno.h>
 #include <string.h>
@@ -35,6 +34,7 @@
 #endif  // WITH_ZCHUNK
 #include "error.h"
 #include "compression_wrapper.h"
+#include <zstd.h>
 
 
 #define ERR_DOMAIN                      CREATEREPO_C_ERROR
@@ -86,11 +86,6 @@ LZMA_CHECK_SHA256
 #define XZ_DECODER_FLAGS        0
 #define XZ_BUFFER_SIZE          (1024*32)
 
-#if ZLIB_VERNUM < 0x1240
-// XXX: Zlib has gzbuffer since 1.2.4
-#define gzbuffer(a,b) 0
-#endif
-
 cr_ContentStat *
 cr_contentstat_new(cr_ChecksumType type, GError **err)
 {
@@ -123,19 +118,26 @@ typedef struct {
     unsigned char buffer[XZ_BUFFER_SIZE];
 } XzFile;
 
+#define CR_CW_ZSTD_COMPRESSION_LEVEL    9
+typedef struct {
+    void *buffer;
+    size_t buffer_size;
+    ZSTD_inBuffer zib;
+    ZSTD_outBuffer zob;
+    void * context;     //ZSTD_{C,D}Ctx
+} ZstdFile;
+
 cr_CompressionType
 cr_detect_compression(const char *filename, GError **err)
 {
-    cr_CompressionType type = CR_CW_UNKNOWN_COMPRESSION;
-
     assert(filename);
     assert(!err || *err == NULL);
 
     if (!g_file_test(filename, G_FILE_TEST_IS_REGULAR)) {
-        g_debug("%s: File %s doesn't exists or not a regular file",
+        g_debug("%s: File %s doesn't exist or not a regular file",
                 __func__, filename);
         g_set_error(err, ERR_DOMAIN, CRE_NOFILE,
-                    "File %s doesn't exists or not a regular file", filename);
+                    "File %s doesn't exist or not a regular file", filename);
         return CR_CW_UNKNOWN_COMPRESSION;
     }
 
@@ -156,89 +158,66 @@ cr_detect_compression(const char *filename, GError **err)
     } else if (g_str_has_suffix(filename, ".zck"))
     {
         return CR_CW_ZCK_COMPRESSION;
+    } else if (g_str_has_suffix(filename, ".zst"))
+    {
+        return CR_CW_ZSTD_COMPRESSION;
     } else if (g_str_has_suffix(filename, ".xml") ||
                g_str_has_suffix(filename, ".tar") ||
                g_str_has_suffix(filename, ".yaml") ||
-               g_str_has_suffix(filename, ".sqlite"))
+               g_str_has_suffix(filename, ".sqlite") ||
+               g_str_has_suffix(filename, ".txt"))
     {
         return CR_CW_NO_COMPRESSION;
     }
 
     // No success? Let's get hardcore... (Use magic bytes)
-
-    magic_t myt = magic_open(MAGIC_MIME | MAGIC_SYMLINK);
-    if (myt == NULL) {
-        g_set_error(err, ERR_DOMAIN, CRE_MAGIC,
-                    "magic_open() failed: Cannot allocate the magic cookie");
+    g_debug("%s: File has no recognizable extension, checking magic bytes (%s)", __func__, filename);
+    unsigned char magic[5];
+    FILE* file = fopen(filename, "rb");
+    if (file == NULL) {
+        g_debug("%s: Unable to open file! (%s)", __func__, filename);
+        g_set_error(err, ERR_DOMAIN, CRE_IO, "fopen(): %s", g_strerror(errno));
         return CR_CW_UNKNOWN_COMPRESSION;
     }
 
-    if (magic_load(myt, NULL) == -1) {
-        g_set_error(err, ERR_DOMAIN, CRE_MAGIC,
-                    "magic_load() failed: %s", magic_error(myt));
-        return CR_CW_UNKNOWN_COMPRESSION;
+    size_t bytesRead = fread(magic, 1, sizeof(magic), file);
+    if (bytesRead != sizeof(magic)) {
+        // Assume that if there's less than 5 bytes in the file, it's uncompressed
+        g_debug("%s: Unable to read bytes from file for magic number detection, assuming uncompressed (%s)",
+            __func__, filename);
+        return CR_CW_NO_COMPRESSION;
+    }
+    fclose(file);
+
+    if (!memcmp(magic, "\x1F\x8B", 2)) {
+        return CR_CW_GZ_COMPRESSION;
+    } else if (!memcmp(magic, "\x28\xB5\x2F\xFD", 4)) {
+        return CR_CW_ZSTD_COMPRESSION;
+    } else if (!memcmp(magic, "\x42\x5A", 2)) {
+        return CR_CW_BZ2_COMPRESSION;
+    } else if (!memcmp(magic, "\xFD\x37\x7A\x58\x5A", 5)) {
+        return CR_CW_XZ_COMPRESSION;
+    } else if (!memcmp(magic, "\0ZCK1", 5)) {
+        return CR_CW_ZCK_COMPRESSION;
     }
 
-    const char *mime_type = magic_file(myt, filename);
+    // Still no luck? Heuristic: if the filename has >1 stacked file extension, and we don't
+    // recognize the last one, then return CR_CW_UNKNOWN_COMPRESSION. If it has only a single
+    // file extension and we don't recognize it, then we return CR_CW_NO_COMPRESSION.
+    g_debug("%s: Unable to detect compression from magic bytes (%s)", __func__, filename);
+    gchar *basename = g_path_get_basename(filename);
+    gchar **parts = g_strsplit(basename, ".", -1);
+    bool more_than_one_extension = g_strv_length(parts) >= 3;
+    g_strfreev(parts);
+    g_free(basename);
 
-    if (mime_type) {
-        g_debug("%s: Detected mime type: %s (%s)", __func__, mime_type,
-                filename);
-
-        if (g_str_has_prefix(mime_type, "application/x-gzip") ||
-            g_str_has_prefix(mime_type, "application/gzip") ||
-            g_str_has_prefix(mime_type, "application/gzip-compressed") ||
-            g_str_has_prefix(mime_type, "application/gzipped") ||
-            g_str_has_prefix(mime_type, "application/x-gzip-compressed") ||
-            g_str_has_prefix(mime_type, "application/x-compress") ||
-            g_str_has_prefix(mime_type, "application/x-gunzip") ||
-            g_str_has_prefix(mime_type, "multipart/x-gzip"))
-        {
-            type = CR_CW_GZ_COMPRESSION;
-        }
-
-        else if (g_str_has_prefix(mime_type, "application/x-bzip2") ||
-                 g_str_has_prefix(mime_type, "application/x-bz2") ||
-                 g_str_has_prefix(mime_type, "application/bzip2") ||
-                 g_str_has_prefix(mime_type, "application/bz2"))
-        {
-            type = CR_CW_BZ2_COMPRESSION;
-        }
-
-        else if (g_str_has_prefix(mime_type, "application/x-xz"))
-        {
-            type = CR_CW_XZ_COMPRESSION;
-        }
-
-        else if (g_str_has_prefix(mime_type, "text/plain") ||
-                 g_str_has_prefix(mime_type, "text/xml") ||
-                 g_str_has_prefix(mime_type, "application/xml") ||
-                 g_str_has_prefix(mime_type, "application/x-xml") ||
-                 g_str_has_prefix(mime_type, "application/x-empty") ||
-                 g_str_has_prefix(mime_type, "application/x-tar") ||
-                 g_str_has_prefix(mime_type, "inode/x-empty"))
-        {
-            type = CR_CW_NO_COMPRESSION;
-        }
+    if (more_than_one_extension) {
+        g_debug("%s: File has more than one extension, returning unknown compression (%s)", __func__, filename);
+        return CR_CW_UNKNOWN_COMPRESSION;
     } else {
-        g_debug("%s: Mime type not detected! (%s): %s", __func__, filename,
-                magic_error(myt));
-        g_set_error(err, ERR_DOMAIN, CRE_MAGIC,
-                    "mime_type() detection failed: %s", magic_error(myt));
-        magic_close(myt);
-        return CR_CW_UNKNOWN_COMPRESSION;
+        g_debug("%s: File has one or no extension, assuming uncompressed (%s)", __func__, filename);
+        return CR_CW_NO_COMPRESSION;
     }
-
-
-    // Xml detection
-
-    if (type == CR_CW_UNKNOWN_COMPRESSION && g_str_has_suffix(filename, ".xml"))
-        type = CR_CW_NO_COMPRESSION;
-
-
-    magic_close(myt);
-
-    return type;
 }
 
 cr_CompressionType
@@ -260,6 +239,8 @@ cr_compression_type(const char *name)
         type = CR_CW_XZ_COMPRESSION;
     if (!g_strcmp0(name_lower, "zck"))
         type = CR_CW_ZCK_COMPRESSION;
+    if (!g_strcmp0(name_lower, "zstd"))
+        type = CR_CW_ZSTD_COMPRESSION;
     g_free(name_lower);
 
     return type;
@@ -277,6 +258,8 @@ cr_compression_suffix(cr_CompressionType comtype)
             return ".xz";
         case CR_CW_ZCK_COMPRESSION:
             return ".zck";
+        case CR_CW_ZSTD_COMPRESSION:
+            return ".zst";
         default:
             return NULL;
     }
@@ -303,10 +286,12 @@ cr_cktype_from_zck(zckCtx *zck, GError **err)
                     "Unable to read hash from zchunk file");
         return CR_CHECKSUM_UNKNOWN;
     }
-    if (cktype == ZCK_HASH_SHA1)
-        return CR_CHECKSUM_SHA1;
-    else if (cktype == ZCK_HASH_SHA256)
+    if (cktype == ZCK_HASH_SHA256)
         return CR_CHECKSUM_SHA256;
+#ifdef WITH_LEGACY_HASHES
+    else if (cktype == ZCK_HASH_SHA1)
+        return CR_CHECKSUM_SHA1;
+#endif
     else {
         const char *ckname = zck_hash_name_from_type(cktype);
         if (ckname == NULL)
@@ -417,6 +402,51 @@ cr_sopen(const char *filename,
                             "gzbuffer() call failed");
             }
             break;
+
+        case (CR_CW_ZSTD_COMPRESSION): { // ------------------------------------
+            FILE *f = fopen(filename, mode_str);
+
+            if (!f) {
+                g_set_error(err, ERR_DOMAIN, CRE_IO, "fopen(): %s", g_strerror(errno));
+                break;
+            }
+
+            file->INNERFILE = f;
+
+            ZstdFile *zstd_file = g_malloc0(sizeof(ZstdFile));
+
+            if (mode == CR_CW_MODE_WRITE) {
+                if ((zstd_file->context = (void *) ZSTD_createCCtx()) == NULL) {
+                    g_set_error(err, ERR_DOMAIN, CRE_ZSTD, "%s",
+                            "Failed to create ZSTD context.");
+                    g_free(zstd_file);
+                    fclose(f);
+                    break;
+                }
+                size_t ret = ZSTD_CCtx_setParameter(zstd_file->context, ZSTD_c_compressionLevel, CR_CW_ZSTD_COMPRESSION_LEVEL);
+                if (ZSTD_isError(ret)) {
+                    g_set_error(err, ERR_DOMAIN, CRE_ZSTD, "%s",
+                            ZSTD_getErrorName(ret));
+                    g_free(zstd_file);
+                    fclose(f);
+                    break;
+                }
+                zstd_file->buffer_size = ZSTD_CStreamOutSize();
+            } else {
+                if ((zstd_file->context = (void *) ZSTD_createDCtx()) == NULL) {
+                    g_free(zstd_file);
+                    fclose(f);
+                    g_set_error(err, ERR_DOMAIN, CRE_IO, "%s",
+                            "Failed to create ZSTD context.");
+                    break;
+                }
+                zstd_file->buffer_size = ZSTD_DStreamInSize();
+            }
+            zstd_file->buffer = g_malloc(zstd_file->buffer_size);
+            file->FILE = (void *) zstd_file;
+
+            break;
+        }
 
         case (CR_CW_BZ2_COMPRESSION): { // ------------------------------------
             FILE *f = fopen(filename, mode_str);
@@ -610,14 +640,12 @@ cr_sopen(const char *filename,
                     zck_set_log_fd(STDOUT_FILENO);
                     g_set_error(err, ERR_DOMAIN, CRE_IO, "%s",
                                 zck_get_error(zck));
-                    g_free(file);
                     break;
                 }
             } else {
                 if (!file->FILE || !zck_init_read(zck, fd)) {
                     g_set_error(err, ERR_DOMAIN, CRE_IO,
                                 "%s", zck_get_error(zck));
-                    g_free(file);
                     break;
                 }
             }
@@ -776,6 +804,38 @@ cr_close(CR_FILE *cr_file, GError **err)
             }
             break;
 
+        case (CR_CW_ZSTD_COMPRESSION): { // --------------------------------------
+            ZstdFile * zstd = (ZstdFile *) cr_file->FILE;
+            if (cr_file->mode == CR_CW_MODE_READ) {
+                ZSTD_freeDCtx(zstd->context);
+            } else {
+                size_t remaining;
+                // No more new input just finish flushing compression data
+                ZSTD_inBuffer zip = { NULL, 0, 0 };
+                do {
+                    zstd->zob.dst = zstd->buffer;
+                    zstd->zob.size = zstd->buffer_size;
+                    zstd->zob.pos = 0;
+
+                    remaining = ZSTD_compressStream2(zstd->context, &zstd->zob , &zip, ZSTD_e_end);
+                    if (ZSTD_isError(remaining)) {
+                        g_set_error(err, ERR_DOMAIN, CRE_ZSTD, "%s", ZSTD_getErrorName(remaining));
+                        break;
+                    } else if (zstd->zob.pos != fwrite(zstd->buffer, 1, zstd->zob.pos, cr_file->INNERFILE)) {
+                        g_set_error(err, ERR_DOMAIN, CRE_IO, "cr_close ZSTD fwrite failed");
+                        break;
+                    }
+                } while(remaining != 0);
+                ZSTD_freeCCtx(zstd->context);
+            }
+
+            fclose(cr_file->INNERFILE);
+            g_free(zstd->buffer);
+            g_free(cr_file->FILE);
+
+            ret = CRE_OK;
+            break;
+        }
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
             if (cr_file->mode == CR_CW_MODE_READ)
                 BZ2_bzReadClose(&rc, (BZFILE *) cr_file->FILE);
@@ -889,12 +949,14 @@ cr_close(CR_FILE *cr_file, GError **err)
                     ret = CRE_ZCK;
                     g_set_error(err, ERR_DOMAIN, CRE_ZCK,
                         "Unable to end final chunk: %s", zck_get_error(zck));
+                    break;
                 }
             }
             if (!zck_close(zck)) {
                 ret = CRE_ZCK;
                 g_set_error(err, ERR_DOMAIN, CRE_ZCK,
                         "Unable to close zchunk file: %s", zck_get_error(zck));
+                break;
             }
             cr_ChecksumType cktype = cr_cktype_from_zck(zck, err);
             if (cktype == CR_CHECKSUM_UNKNOWN) {
@@ -985,6 +1047,38 @@ cr_read(CR_FILE *cr_file, void *buffer, unsigned int len, GError **err)
             }
             break;
 
+        case (CR_CW_ZSTD_COMPRESSION): { // ---------------------------------------
+            ZstdFile * zstd = (ZstdFile *) cr_file->FILE;
+
+            ZSTD_outBuffer zob = {buffer, len, 0};
+
+            while (zob.pos < zob.size) {
+                // Re-fill compressed data buffer
+                if (zstd->zib.pos >= zstd->zib.size) {
+                    zstd->zib.size = fread(zstd->buffer, 1, zstd->buffer_size, cr_file->INNERFILE);
+                    if (zstd->zib.size == 0) {
+                        break; //EOF
+                    }
+                    zstd->zib.src = zstd->buffer;
+                    zstd->zib.pos = 0;
+                }
+
+                // Decompress chunk
+                int decomp_ret = ZSTD_decompressStream(zstd->context, &zob, &zstd->zib);
+                if (ZSTD_isError(decomp_ret)) {
+                    ret = CR_CW_ERR;
+                    g_set_error(err, ERR_DOMAIN, CRE_ZSTD, "%s", ZSTD_getErrorName(decomp_ret));
+                    break;
+                }
+
+            }
+
+            if (!(err && *err)) {
+                ret = zob.pos;
+            }
+
+            break;
+        }
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
             ret = BZ2_bzRead(&bzerror, (BZFILE *) cr_file->FILE, buffer, len);
             if (!ret && bzerror == BZ_SEQUENCE_ERROR)
@@ -1219,6 +1313,40 @@ cr_write(CR_FILE *cr_file, const void *buffer, unsigned int len, GError **err)
             }
             break;
 
+        case (CR_CW_ZSTD_COMPRESSION): { // ---------------------------------------
+            ZstdFile * zstd = (ZstdFile *) cr_file->FILE;
+            ZSTD_inBuffer zib = {buffer, len, 0};
+
+            while (zib.pos < zib.size) {
+                zstd->zob.dst = zstd->buffer;
+                zstd->zob.size = zstd->buffer_size;
+                zstd->zob.pos = 0;
+
+                // Compress chunk into buffer
+                size_t remaining = ZSTD_compressStream2(zstd->context, &zstd->zob , &zib, ZSTD_e_continue);
+                if (ZSTD_isError(remaining)) {
+                    g_set_error(err, ERR_DOMAIN, CRE_ZSTD, "%s", ZSTD_getErrorName(remaining));
+                    break;
+                }
+
+                // Write compressed buffer
+                if (zstd->zob.pos > 0) {
+                    size_t nw = fwrite(zstd->buffer, 1, zstd->zob.pos, cr_file->INNERFILE);
+                    if (nw != zstd->zob.pos) {
+                        g_set_error(err, ERR_DOMAIN, CRE_IO, "cr_write zstd write failed");
+                        break;
+                    }
+                }
+
+            }
+
+            if (!(err && *err)) {
+                ret = zib.pos;
+            }
+
+            break;
+        }
+
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
             BZ2_bzWrite(&bzerror, (BZFILE *) cr_file->FILE, (void *) buffer, len);
             if (bzerror == BZ_OK) {
@@ -1366,6 +1494,7 @@ cr_puts(CR_FILE *cr_file, const char *str, GError **err)
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
         case (CR_CW_XZ_COMPRESSION): // ---------------------------------------
         case (CR_CW_ZCK_COMPRESSION): // --------------------------------------
+        case (CR_CW_ZSTD_COMPRESSION): // --------------------------------------
             len = strlen(str);
             ret = cr_write(cr_file, str, len, err);
             if (ret != (int) len)
@@ -1403,6 +1532,7 @@ cr_end_chunk(CR_FILE *cr_file, GError **err)
         case (CR_CW_GZ_COMPRESSION): // ---------------------------------------
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
         case (CR_CW_XZ_COMPRESSION): // ---------------------------------------
+        case (CR_CW_ZSTD_COMPRESSION): // ---------------------------------------
             break;
         case (CR_CW_ZCK_COMPRESSION): { // ------------------------------------
 #ifdef WITH_ZCHUNK
@@ -1455,6 +1585,7 @@ cr_set_autochunk(CR_FILE *cr_file, gboolean auto_chunk, GError **err)
         case (CR_CW_GZ_COMPRESSION): // ---------------------------------------
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
         case (CR_CW_XZ_COMPRESSION): // ---------------------------------------
+        case (CR_CW_ZSTD_COMPRESSION): // ---------------------------------------
             break;
         case (CR_CW_ZCK_COMPRESSION): { // ------------------------------------
 #ifdef WITH_ZCHUNK
@@ -1514,6 +1645,7 @@ cr_printf(GError **err, CR_FILE *cr_file, const char *format, ...)
         g_debug("%s: vasprintf() call failed", __func__);
         g_set_error(err, ERR_DOMAIN, CRE_MEMORY,
                     "vasprintf() call failed");
+        g_free(buf);
         return CR_CW_ERR;
     }
 
@@ -1528,6 +1660,7 @@ cr_printf(GError **err, CR_FILE *cr_file, const char *format, ...)
         case (CR_CW_BZ2_COMPRESSION): // --------------------------------------
         case (CR_CW_XZ_COMPRESSION): // ---------------------------------------
         case (CR_CW_ZCK_COMPRESSION): // --------------------------------------
+        case (CR_CW_ZSTD_COMPRESSION): // --------------------------------------
             tmp_ret = cr_write(cr_file, buf, ret, err);
             if (tmp_ret != (int) ret)
                 ret = CR_CW_ERR;
@@ -1548,7 +1681,7 @@ cr_printf(GError **err, CR_FILE *cr_file, const char *format, ...)
     return ret;
 }
 
-ssize_t 
+ssize_t
 cr_get_zchunk_with_index(CR_FILE *cr_file, ssize_t zchunk_index, char **copy_buf, GError **err)
 {
     assert(cr_file);

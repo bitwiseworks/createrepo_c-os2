@@ -34,7 +34,31 @@ extern "C" {
  */
 ModulemdModuleIndex *cr_metadata_modulemd(cr_Metadata *md);
 
+/** Load (compressed) module metadata file into moduleindex,
+ * compression is autodetected.
+ * @param moduleindex   memory adress where to store the
+ *                      created pointer to ModulemdModuleIndex
+ * @param path_to_md    path to module metadata
+ * @return              cr_Error code
+ */
+int
+cr_metadata_load_modulemd(ModulemdModuleIndex **moduleindex,
+                          gchar *path_to_md,
+                          GError **err);
+
+/** Compress groupfile into dest_dir with specified compression.
+ * @param groupfile     Path to local groupfile, it can be already compressed by
+ *                      some compression.
+ * @param dest_dir      Path to directory where the compressed groupfile should be stored.
+ * @return              Path to the new compressed groupfile. Has to be freed by the caller.
+ */
+
 #endif /* WITH_LIBMODULEMD */
+
+gchar *
+cr_compress_groupfile(const char *groupfile,
+                      const char *dest_dir,
+                      cr_CompressionType compression);
 
 #ifdef __cplusplus
 }

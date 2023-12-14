@@ -26,6 +26,10 @@
 
 #define DEFAULT_CHANGELOG_LIMIT         10
 
+typedef enum {
+    CR_ARG_DUP_NEVRA_KEEP_ALL = 0,
+    CR_ARG_DUP_NEVRA_KEEP_LAST,
+} CmdDupNevra;
 
 /**
  * Command line options
@@ -52,6 +56,7 @@ struct CmdOptions {
     gboolean version;           /*!< print program version */
     gboolean database;          /*!< create sqlite database metadata */
     gboolean no_database;       /*!< do not create database */
+    gboolean filelists_ext;     /*!< create filelists-ext metadata with file hashes */
     char *checksum;             /*!< type of checksum */
     char *compress_type;        /*!< which compression type to use */
     char *general_compress_type;/*!< which compression type to use (even for
@@ -77,6 +82,7 @@ struct CmdOptions {
     char *zck_dict_dir;         /*!< directory with zchunk dictionaries */
     gboolean keep_all_metadata; /*!< keep groupfile and updateinfo from source
                                      repo during update */
+    gboolean discard_additional_metadata; /*!< Inverse option to keep_all_metadata */
     gboolean ignore_lock;       /*!< Ignore existing .repodata/ - remove it,
                                      create the new one (empty) to serve as
                                      a lock and use a .repodata.date.pid for
@@ -138,6 +144,10 @@ struct CmdOptions {
     GSList *modulemd_metadata;  /*!< paths to all modulemd metadata */
 
     gboolean recycle_pkglist;
+    gboolean delayed_dump;      /*!< Load _all_ the packages (parallel workers)
+                                     first, and then dump the database.  This
+                                     allows additional package filtering. */
+    CmdDupNevra nevra_duplicates; /*!< What to do about duplicated NEVRA */
 };
 
 /**

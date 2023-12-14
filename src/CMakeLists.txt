@@ -31,6 +31,7 @@ SET (createrepo_c_SRCS
      xml_parser_primary.c
      xml_parser_repomd.c
      xml_parser_updateinfo.c
+     xml_parser_main_metadata_together.c
      koji.c)
 
 SET(headers
@@ -39,6 +40,7 @@ SET(headers
     constants.h
     mergerepo_c.h
     createrepo_c.h
+    createrepo_shared.h
     deltarpms.h
     error.h
     helpers.h
@@ -59,6 +61,23 @@ SET(headers
     koji.h
     xml_parser.h)
 
+# glibc needs _XOPEN_SOURCE >= 500 defined in order to expose nftw(),
+# other systems do not need this macro defined.  If necessary, set the
+# macro to 700 since that's the 7th revision which is what the Python
+# pieces will want.
+INCLUDE (CheckSymbolExists)
+CHECK_SYMBOL_EXISTS(nftw ftw.h HAVE_NFTW)
+IF (NOT HAVE_NFTW)
+    LIST(APPEND CMAKE_REQUIRED_DEFINITIONS -D_XOPEN_SOURCE=700)
+    CHECK_SYMBOL_EXISTS(nftw ftw.h HAVE_NFTW_XOPEN)
+
+    IF (HAVE_NFTW_XOPEN)
+        ADD_COMPILE_DEFINITIONS(_XOPEN_SOURCE=700)
+    ELSE ()
+        ERROR("unable to find nftw() definition")
+    ENDIF ()
+ENDIF ()
+
 IF (BUILD_LIBCREATEREPO_C_SHARED)
   SET (createrepo_c_library_type SHARED)
 ELSE ()
@@ -68,7 +87,7 @@ ADD_LIBRARY(libcreaterepo_c ${createrepo_c_library_type} ${createrepo_c_SRCS})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${BZIP2_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${CURL_LIBRARY})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${GLIB2_LIBRARIES})
-TARGET_LINK_LIBRARIES(libcreaterepo_c ${LIBMAGIC_LIBRARIES})
+TARGET_LINK_LIBRARIES(libcreaterepo_c ${GIO_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${LIBMODULEMD_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${LIBXML2_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${LZMA_LIBRARIES})
@@ -78,6 +97,7 @@ TARGET_LINK_LIBRARIES(libcreaterepo_c ${SQLITE3_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${ZLIB_LIBRARY})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${ZCK_LIBRARIES})
 TARGET_LINK_LIBRARIES(libcreaterepo_c ${DRPM_LIBRARIES})
+TARGET_LINK_LIBRARIES(libcreaterepo_c ${ZSTD_LIBRARIES})
 
 SET_TARGET_PROPERTIES(libcreaterepo_c PROPERTIES
                       OUTPUT_NAME "createrepo_c"

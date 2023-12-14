@@ -15,15 +15,13 @@ VERSION_PATCH = _createrepo_c.VERSION_PATCH  #: Patch version
 #: Version string
 VERSION = u"%d.%d.%d" % (VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
 
-UNKNOWN_CHECKSUM    = _createrepo_c.CHECKSUM_UNKNOWN #: Checksum unknown
-CHECKSUM_UNKNOWN    = _createrepo_c.CHECKSUM_UNKNOWN #: Checksum unknown
-MD5                 = _createrepo_c.MD5              #: MD5 checksum
-SHA                 = _createrepo_c.SHA              #: SHA1 checksum alias
-SHA1                = _createrepo_c.SHA1             #: SHA1 checksum
-SHA224              = _createrepo_c.SHA224           #: SHA224 checksum
-SHA256              = _createrepo_c.SHA256           #: SHA256 checksum
-SHA384              = _createrepo_c.SHA384           #: SHA384 checksum
-SHA512              = _createrepo_c.SHA512           #: SHA512 checksum
+UNKNOWN_CHECKSUM = _createrepo_c.CHECKSUM_UNKNOWN #: Checksum unknown
+CHECKSUM_UNKNOWN = _createrepo_c.CHECKSUM_UNKNOWN #: Checksum unknown
+
+for hash_name in ('MD5', 'SHA', 'SHA1', 'SHA224', 'SHA256', 'SHA384', 'SHA512'):
+    hash_attr = getattr(_createrepo_c, hash_name, None)
+    if hash_attr:
+        globals()[hash_name] = hash_attr
 
 MODE_READ   = _createrepo_c.MODE_READ  #: Read open mode
 MODE_WRITE  = _createrepo_c.MODE_WRITE #: Write open mode
@@ -61,6 +59,9 @@ XZ                      = _createrepo_c.XZ_COMPRESSION
 #: Zchunk compression alias
 ZCK                     = _createrepo_c.ZCK_COMPRESSION
 
+#: Zstd compression alias
+ZSTD                     = _createrepo_c.ZSTD_COMPRESSION
+
 HT_KEY_DEFAULT  = _createrepo_c.HT_KEY_DEFAULT  #: Default key (hash)
 HT_KEY_HASH     = _createrepo_c.HT_KEY_HASH     #: Package hash as a key
 HT_KEY_NAME     = _createrepo_c.HT_KEY_NAME     #: Package name as a key
@@ -69,15 +70,17 @@ HT_KEY_FILENAME = _createrepo_c.HT_KEY_FILENAME #: Package filename as a key
 HT_DUPACT_KEEPFIRST = _createrepo_c.HT_DUPACT_KEEPFIRST #: If an key is duplicated, keep only the first occurrence
 HT_DUPACT_REMOVEALL = _createrepo_c.HT_DUPACT_REMOVEALL #: If an key is duplicated, discard all occurrences
 
-DB_PRIMARY      = _createrepo_c.DB_PRIMARY   #: Primary database
-DB_FILELISTS    = _createrepo_c.DB_FILELISTS #: Filelists database
-DB_OTHER        = _createrepo_c.DB_OTHER     #: Other database
+DB_PRIMARY       = _createrepo_c.DB_PRIMARY       #: Primary database
+DB_FILELISTS     = _createrepo_c.DB_FILELISTS     #: Filelists database
+DB_FILELISTS_EXT = _createrepo_c.DB_FILELISTS_EXT #: Filelists_ext database
+DB_OTHER         = _createrepo_c.DB_OTHER         #: Other database
 
-XMLFILE_PRIMARY     = _createrepo_c.XMLFILE_PRIMARY     #: Primary xml file
-XMLFILE_FILELISTS   = _createrepo_c.XMLFILE_FILELISTS   #: Filelists xml file
-XMLFILE_OTHER       = _createrepo_c.XMLFILE_OTHER       #: Other xml file
-XMLFILE_PRESTODELTA = _createrepo_c.XMLFILE_PRESTODELTA #: Prestodelta xml file
-XMLFILE_UPDATEINFO  = _createrepo_c.XMLFILE_UPDATEINFO  #: Updateinfo xml file
+XMLFILE_PRIMARY       = _createrepo_c.XMLFILE_PRIMARY       #: Primary xml file
+XMLFILE_FILELISTS     = _createrepo_c.XMLFILE_FILELISTS     #: Filelists xml file
+XMLFILE_FILELISTS_EXT = _createrepo_c.XMLFILE_FILELISTS_EXT #: Filelists_ext xml file
+XMLFILE_OTHER         = _createrepo_c.XMLFILE_OTHER         #: Other xml file
+XMLFILE_PRESTODELTA   = _createrepo_c.XMLFILE_PRESTODELTA   #: Prestodelta xml file
+XMLFILE_UPDATEINFO    = _createrepo_c.XMLFILE_UPDATEINFO    #: Updateinfo xml file
 
 #: XML warning - Unknown tag
 XML_WARNING_UNKNOWNTAG  = _createrepo_c.XML_WARNING_UNKNOWNTAG
@@ -103,10 +106,12 @@ PCOR_ENTRY_RELEASE = 4 #: PCOR entry tuple index - release
 PCOR_ENTRY_PRE     = 5 #: PCOR entry tuple index - pre
 
 
+# NOTE(amatej): Consider changing the tuple into a class if it should be extended with new data.
 # Tuple indexes for file entry
 FILE_ENTRY_TYPE = 0 #: File entry tuple index - file type
 FILE_ENTRY_PATH = 1 #: File entry tuple index - path
 FILE_ENTRY_NAME = 2 #: File entry tuple index - file name
+FILE_ENTRY_DIGEST = 3 #: File entry tuple index - file digest, present only in filelists-ext
 
 # Tuple indexes for changelog entry
 CHANGELOG_ENTRY_AUTHOR    = 0 #: Changelog entry tuple index - Author
@@ -151,8 +156,14 @@ class Repomd(_createrepo_c.Repomd):
     def __init__(self, path=None):
         """:arg path: Path to existing repomd.xml or None"""
         _createrepo_c.Repomd.__init__(self)
+        self.warnings = []
+
+        def _warningcb(warning_type, message):
+            self.warnings.append((warning_type, message))
+            return True  # continue parsing
+
         if path:
-            xml_parse_repomd(path, self)
+            xml_parse_repomd(path, self, warningcb=_warningcb)
 
     def __iter__(self):
         for rec in self.records:
@@ -231,9 +242,14 @@ class UpdateInfo(_createrepo_c.UpdateInfo):
     def __init__(self, path=None):
         """:arg path: Path to existing updateinfo.xml or None"""
         _createrepo_c.UpdateInfo.__init__(self)
-        if path:
-            xml_parse_updateinfo(path, self)
+        self.warnings = []
 
+        def _warningcb(warning_type, message):
+            self.warnings.append((warning_type, message))
+            return True  # continue parsing
+
+        if path:
+            xml_parse_updateinfo(path, self, warningcb=_warningcb)
 
 # UpdateRecord class
 
@@ -261,9 +277,10 @@ class PrimaryXmlFile(XmlFile):
 class FilelistsXmlFile(XmlFile):
     def __init__(self, path, compressiontype=GZ_COMPRESSION,
                  contentstat=None):
-        """:arg path: Path to the filelists xml file
+        """:arg path: Path to the filelists[_ext] xml file
         :arg compressiontype: Compression type
         :arg contentstat: ContentStat object"""
+        # TODO(aplanas) Do I need to differentiate?
         XmlFile.__init__(self, path, XMLFILE_FILELISTS,
                          compressiontype, contentstat)
 
@@ -301,7 +318,8 @@ def xml_from_rpm(filename, checksum_type=SHA256, location_href=None,
 
 xml_dump_primary        = _createrepo_c.xml_dump_primary
 xml_dump_filelists      = _createrepo_c.xml_dump_filelists
-xml_dump_other          =  _createrepo_c.xml_dump_other
+xml_dump_filelists_ext  = _createrepo_c.xml_dump_filelists_ext
+xml_dump_other          = _createrepo_c.xml_dump_other
 xml_dump_updaterecord   = _createrepo_c.xml_dump_updaterecord
 xml_dump                = _createrepo_c.xml_dump
 
@@ -312,7 +330,7 @@ def xml_parse_primary(path, newpkgcb=None, pkgcb=None,
                                            warningcb, do_files)
 
 def xml_parse_filelists(path, newpkgcb=None, pkgcb=None, warningcb=None):
-    """Parse filelists.xml"""
+    """Parse filelists[_ext].xml"""
     return _createrepo_c.xml_parse_filelists(path, newpkgcb, pkgcb, warningcb)
 
 def xml_parse_other(path, newpkgcb=None, pkgcb=None, warningcb=None):
@@ -327,7 +345,7 @@ def xml_parse_primary_snippet(xml_string, newpkgcb=None, pkgcb=None,
 
 def xml_parse_filelists_snippet(xml_string, newpkgcb=None, pkgcb=None,
                                 warningcb=None):
-    """Parse the contents of filelists.xml from a string"""
+    """Parse the contents of filelists[_ext].xml from a string"""
     return _createrepo_c.xml_parse_filelists_snippet(xml_string, newpkgcb, pkgcb,
                                              warningcb)
 
@@ -358,6 +376,11 @@ compression_suffix  = _createrepo_c.compression_suffix
 detect_compression  = _createrepo_c.detect_compression
 compression_type    = _createrepo_c.compression_type
 
+class PackageIterator(_createrepo_c.PkgIterator):
+    def __init__(self, primary_path, filelists_path, other_path, newpkgcb=None, warningcb=None):
+        """Parse completed packages one at a time."""
+        _createrepo_c.PkgIterator.__init__(
+            self, primary_path, filelists_path, other_path, newpkgcb, warningcb)
 
 # If we have been built as a Python package, e.g. "setup.py", this is where the binaries
 # will be located.

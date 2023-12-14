@@ -1,5 +1,5 @@
+CMAKE_MINIMUM_REQUIRED (VERSION 2.8.12)
 PROJECT (createrepo_c C)
-CMAKE_MINIMUM_REQUIRED (VERSION 2.8.10)
 
 include(GNUInstallDirs)
 
@@ -32,7 +32,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 SET(G_LOG_DOMAIN "C_CREATEREPOLIB")
 
 # Find necessary libraries
-
+find_package(PkgConfig)
 find_package(BZip2 REQUIRED)
 find_package(CURL REQUIRED)
 find_package(LibXml2 REQUIRED)
@@ -40,32 +40,35 @@ find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 
 pkg_check_modules(GLIB2 REQUIRED glib-2.0)
+pkg_check_modules(GIO REQUIRED gio-2.0)
 pkg_check_modules(GTHREAD2 REQUIRED gthread-2.0)
 pkg_check_modules(LZMA REQUIRED liblzma)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(RPM REQUIRED rpm)
-
-pkg_check_modules(LIBMAGIC libmagic)
-# the pkg-config was only added in F33
-IF (NOT LIBMAGIC_FOUND)
-    find_path(LIBMAGIC_INCLUDE_DIRS NAMES magic.h PATHS ${CMAKE_INCLUDE_PATH})
-    find_library(LIBMAGIC_LIBRARIES NAMES magic PATHS ${CMAKE_LIBRARY_PATH})
-ENDIF()
+pkg_check_modules(ZSTD REQUIRED libzstd)
 
 # Add include dirs
 
 include_directories(${BZIP2_INCLUDE_DIRS})
 include_directories(${CURL_INCLUDE_DIRS})
 include_directories(${GLIB2_INCLUDE_DIRS})
+include_directories(${GIO_INCLUDE_DIRS})
 include_directories(${LIBXML2_INCLUDE_DIR})
 include_directories(${OPENSSL_INCLUDE_DIR})
 include_directories(${ZLIB_INCLUDE_DIR})
+include_directories(${ZSTD_INCLUDE_DIRS})
 
 # SuSE/Mageia/Mandriva legacy weak deps support
 OPTION (ENABLE_LEGACY_WEAKDEPS "Enable legacy SUSE/Mageia/Mandriva weakdeps support?" ON)
 IF (ENABLE_LEGACY_WEAKDEPS)
     ADD_DEFINITIONS("-DENABLE_LEGACY_WEAKDEPS=1")
 ENDIF (ENABLE_LEGACY_WEAKDEPS)
+
+# Legacy hash functions
+OPTION (WITH_LEGACY_HASHES "Build with SHA-1 and MD5 support" OFF)
+IF (WITH_LEGACY_HASHES)
+    ADD_DEFINITIONS("-DWITH_LEGACY_HASHES=1")
+ENDIF (WITH_LEGACY_HASHES)
 
 # drpm
 OPTION (ENABLE_DRPM "Enable delta RPM support?" OFF)
@@ -93,6 +96,13 @@ IF (WITH_LIBMODULEMD)
     SET (CMAKE_C_FLAGS          "${CMAKE_C_FLAGS} -DWITH_LIBMODULEMD")
     SET (CMAKE_C_FLAGS_DEBUG    "${CMAKE_C_FLAGS_DEBUG} -DWITH_LIBMODULEMD")
 ENDIF (WITH_LIBMODULEMD)
+
+
+if (WITH_SANITIZERS)
+    message(WARNING "Building with sanitizers enabled!")
+    add_compile_options(-fsanitize=address -fsanitize=undefined -fsanitize=leak)
+    link_libraries(asan ubsan)
+endif()
 
 # Threaded XZ Compression
 # Note: This option is disabled by default, because Createrepo_c
@@ -148,4 +158,3 @@ ADD_SUBDIRECTORY (src)
 ADD_SUBDIRECTORY (doc)
 ENABLE_TESTING()
 ADD_SUBDIRECTORY (tests EXCLUDE_FROM_ALL)
-

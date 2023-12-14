@@ -388,8 +388,9 @@ test_cr_get_filename(void)
 }
 
 
+// Read from the file maximum of buffer_len-1 bytes and add terminating zero.
 static int
-read_file(char *f, cr_CompressionType compression, char* buffer, int amount)
+read_file(char *f, cr_CompressionType compression, char* buffer, int buffer_len)
 {
     int ret = CRE_OK;
     GError *tmp_err = NULL;
@@ -399,7 +400,9 @@ read_file(char *f, cr_CompressionType compression, char* buffer, int amount)
         ret = tmp_err->code;
         return ret;
     }
-    cr_read(orig, buffer, amount, &tmp_err);
+    int read = cr_read(orig, buffer, buffer_len-1, &tmp_err);
+    g_assert_cmpint(read, !=, CR_CW_ERR);
+    buffer[read] = 0;
     if (orig)
         cr_close(orig, NULL);
     return ret;
@@ -544,19 +547,20 @@ compressfile_test_text_file(Copyfiletest *copyfiletest,
                             G_GNUC_UNUSED gconstpointer test_data)
 {
     int ret;
-    char *checksum;
     GError *tmp_err = NULL;
 
     g_assert(!g_file_test(copyfiletest->dst_file, G_FILE_TEST_EXISTS));
+
     ret = cr_compress_file(TEST_TEXT_FILE, copyfiletest->dst_file,
                            CR_CW_GZ_COMPRESSION, NULL, FALSE, &tmp_err);
     g_assert(!tmp_err);
     g_assert_cmpint(ret, ==, CRE_OK);
     g_assert(g_file_test(copyfiletest->dst_file, G_FILE_TEST_IS_REGULAR));
-    checksum = cr_checksum_file(copyfiletest->dst_file, CR_CHECKSUM_SHA256, NULL);
-    g_assert_cmpstr(checksum, ==, "8909fde88a5747d800fd2562b0f22945f014aa7df64"
-                                  "cf1c15c7933ae54b72ab6");
-    g_free(checksum);
+
+    // assert content is readable after compression and decompression
+    char buf[30];
+    read_file(copyfiletest->dst_file, CR_CW_GZ_COMPRESSION, buf, 30);
+    g_assert(g_strrstr(buf, "Lorem ipsum dolor sit amet"));
 }
 
 
@@ -582,6 +586,7 @@ compressfile_with_stat_test_text_file(Copyfiletest *copyfiletest,
     g_assert(g_file_test(copyfiletest->dst_file, G_FILE_TEST_IS_REGULAR));
     checksum = cr_checksum_file(TEST_TEXT_FILE, CR_CHECKSUM_SHA256, NULL);
     g_assert_cmpstr(stat->checksum, ==, checksum);
+    g_free(checksum);
     cr_contentstat_free(stat, &tmp_err);
     g_assert(!tmp_err);
 }
@@ -611,6 +616,7 @@ compressfile_with_stat_test_gz_file_gz_output(Copyfiletest *copyfiletest,
     g_assert(g_file_test(dst_full_name, G_FILE_TEST_IS_REGULAR));
     checksum = cr_checksum_file(TEST_TEXT_FILE, CR_CHECKSUM_SHA256, NULL);
     g_assert_cmpstr(stat->checksum, ==, checksum);
+    g_free(checksum);
 
     //assert content is readable after decompression and recompression
     char buf[30];
@@ -695,6 +701,7 @@ compressfile_test_sqlite_file_gz_output(Copyfiletest *copyfiletest,
     g_assert(g_file_test(dst_full_name, G_FILE_TEST_EXISTS));
 
     g_assert(!tmp_err);
+    g_free(dst_full_name);
 }
 
 

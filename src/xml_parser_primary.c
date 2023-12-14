@@ -156,6 +156,9 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         return;
     }
 
+    gboolean free_attr = FALSE;
+    attr = unescape_ampersand_from_values(attr, &free_attr);
+
     // Update parser data
     pd->state      = sw->to;
     pd->docontent  = sw->docontent;
@@ -444,6 +447,10 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
     default:
         break;
     }
+
+    if (free_attr) {
+        g_strfreev((char **)attr);
+    }
 }
 
 static void XMLCALL
@@ -633,6 +640,12 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
         cr_PackageFile *pkg_file = cr_package_file_new();
         pkg_file->name = cr_safe_string_chunk_insert(pd->pkg->chunk,
                                                 cr_get_filename(pd->content));
+        if (!pkg_file->name) {
+            g_set_error(&pd->err, ERR_DOMAIN, ERR_CODE_XML,
+                        "Invalid <file> element: %s", pd->content);
+            g_free(pkg_file);
+            break;
+        }
         pd->content[pd->lcontent - strlen(pkg_file->name)] = '\0';
         pkg_file->path = cr_safe_string_chunk_insert_const(pd->pkg->chunk,
                                                            pd->content);
@@ -652,25 +665,18 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
     }
 }
 
-int
-cr_xml_parse_primary_internal(const char *target,
-                              cr_XmlParserNewPkgCb newpkgcb,
-                              void *newpkgcb_data,
-                              cr_XmlParserPkgCb pkgcb,
-                              void *pkgcb_data,
-                              cr_XmlParserWarningCb warningcb,
-                              void *warningcb_data,
-                              int do_files,
-                              int (*parser_func)(xmlParserCtxtPtr, cr_ParserData *, const char *, GError**),
-                              GError **err)
+cr_ParserData *
+primary_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                        void *newpkgcb_data,
+                        cr_XmlParserPkgCb pkgcb,
+                        void *pkgcb_data,
+                        cr_XmlParserWarningCb warningcb,
+                        void *warningcb_data,
+                        int do_files)
 {
-    int ret = CRE_OK;
     cr_ParserData *pd;
-    GError *tmp_err = NULL;
 
-    assert(target);
     assert(newpkgcb || pkgcb);
-    assert(!err || *err == NULL);
 
     if (!newpkgcb)  // Use default newpkgcb
         newpkgcb = cr_newpkgcb;
@@ -684,10 +690,7 @@ cr_xml_parse_primary_internal(const char *target,
 
     pd = cr_xml_parser_data(NUMSTATES);
 
-    xmlParserCtxtPtr parser;
-    parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
-
-    pd->parser = parser;
+    pd->parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
     pd->state = STATE_START;
     pd->newpkgcb_data = newpkgcb_data;
     pd->newpkgcb = newpkgcb;
@@ -702,9 +705,32 @@ cr_xml_parse_primary_internal(const char *target,
         pd->sbtab[sw->to] = sw->from;
     }
 
-    // Parsing
+    return pd;
+}
 
-    ret = parser_func(parser, pd, target, &tmp_err);
+int
+cr_xml_parse_primary_internal(const char *target,
+                              cr_XmlParserNewPkgCb newpkgcb,
+                              void *newpkgcb_data,
+                              cr_XmlParserPkgCb pkgcb,
+                              void *pkgcb_data,
+                              cr_XmlParserWarningCb warningcb,
+                              void *warningcb_data,
+                              int do_files,
+                              int (*parser_func)(xmlParserCtxtPtr, cr_ParserData *, const char *, GError**),
+                              GError **err)
+{
+    int ret = CRE_OK;
+    GError *tmp_err = NULL;
+
+    assert(target);
+    assert(!err || *err == NULL);
+
+    cr_ParserData *pd;
+    pd = primary_parser_data_new(newpkgcb, newpkgcb_data, pkgcb, pkgcb_data, warningcb, warningcb_data, do_files);
+
+    // Parsing
+    ret = parser_func(pd->parser, pd, target, &tmp_err);
 
     if (tmp_err)
         g_propagate_error(err, tmp_err);
@@ -730,7 +756,6 @@ cr_xml_parse_primary_internal(const char *target,
     }
 
     cr_xml_parser_data_free(pd);
-    xmlFreeParserCtxt(parser);
 
     return ret;
 }
@@ -762,9 +787,9 @@ cr_xml_parse_primary_snippet(const char *xml_string,
                              int do_files,
                              GError **err)
 {
-    char* wrapped_xml_string = g_strconcat("<metadata>", xml_string, "</metadata>", NULL);
+    gchar* wrapped_xml_string = g_strconcat("<metadata>", xml_string, "</metadata>", NULL);
     int ret =  cr_xml_parse_primary_internal(wrapped_xml_string, newpkgcb, newpkgcb_data, pkgcb, pkgcb_data,
                                              warningcb, warningcb_data, do_files, &cr_xml_parser_generic_from_string, err);
-    free(wrapped_xml_string);
+    g_free(wrapped_xml_string);
     return ret;
 }

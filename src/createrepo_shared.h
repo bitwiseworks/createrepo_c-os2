@@ -75,7 +75,7 @@ cr_unblock_terminating_signals(GError **err);
 /**
  * This function does:
  * - Tries to create repo/.repodata/ dir.
- * - If it doesn't exists, it's created and function returns TRUE.
+ * - If it doesn't exist, it's created and function returns TRUE.
  * - If it exists and ignore_lock is FALSE, returns FALSE and err is set.
  * - If it exists and ignore_lock is TRUE it:
  *  - Removes the existing .repodata/ dir and all its content
@@ -119,13 +119,6 @@ cr_unset_cleanup_handler(GError **err);
  */
 void
 cr_setup_logging(gboolean quiet, gboolean verbose);
-
-/**
- * Set global pointer to exit value that is used in function set by atexit
- * @param exit_val          Pointer to exit_value int
- */
-void
-cr_set_global_exit_value(int *exit_val);
 
 /** @} */
 

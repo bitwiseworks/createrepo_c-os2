@@ -45,6 +45,7 @@
 #include "misc.h"
 #include "parsepkg.h"
 #include "repomd.h"
+#include "repomd_internal.h"
 #include "sqlite.h"
 #include "threads.h"
 #include "version.h"
@@ -56,11 +57,21 @@
 #endif /* WITH_LIBMODULEMD */
 
 #define OUTDELTADIR "drpms/"
+#define DEFAULT_DATABASE_VERSION    10
 
-// TODO: Pass only exlude_masks list here
-/** Check if the filename is excluded by any exlude mask.
+/*
+ * Starting with glib 2.70.0, g_pattern_spec_match() replaces
+ * g_pattern_match().
+ */
+#if GLIB_CHECK_VERSION(2, 70, 0)
+#define PATTERN_MATCH g_pattern_spec_match
+#else
+#define PATTERN_MATCH g_pattern_match
+#endif
+
+/** Check if the filename is excluded by any exclude mask.
  * @param filename      Filename (basename).
- * @param options       Command line options.
+ * @param exclude_masks List of exclude masks
  * @return              TRUE if file should be included, FALSE otherwise
  */
 static gboolean
@@ -73,8 +84,8 @@ allowed_file(const gchar *filename, GSList *exclude_masks)
 
         GSList *element = exclude_masks;
         for (; element; element=g_slist_next(element)) {
-            if (g_pattern_match((GPatternSpec *) element->data,
-                                str_len, filename, reversed_filename))
+            if (PATTERN_MATCH((GPatternSpec *) element->data,
+                              str_len, filename, reversed_filename))
             {
                 g_free(reversed_filename);
                 g_debug("Exclude masks hit - skipping: %s", filename);
@@ -89,12 +100,13 @@ allowed_file(const gchar *filename, GSList *exclude_masks)
 static gboolean
 allowed_modulemd_module_metadata_file(const gchar *filename)
 {
-    if (g_str_has_suffix (filename, ".modulemd.yaml") ||
-        g_str_has_suffix (filename, ".modulemd-defaults.yaml") ||
-        g_str_has_suffix (filename, "modules.yaml"))
-    {
+    if (g_strrstr(filename, "modules.yaml"))
         return TRUE;
-    }
+    if (g_strrstr(filename, ".modulemd.yaml"))
+        return TRUE;
+    if (g_strrstr(filename, ".modulemd-defaults.yaml"))
+        return TRUE;
+
     return FALSE;
 }
 
@@ -104,14 +116,13 @@ allowed_modulemd_module_metadata_file(const gchar *filename)
  *
  * @param a_p           Pointer to first struct PoolTask
  * @param b_p           Pointer to second struct PoolTask
- * @param user_data     Unused (user data)
  */
 static int
-task_cmp(gconstpointer a_p, gconstpointer b_p, G_GNUC_UNUSED gpointer user_data)
+task_cmp(gconstpointer a_p, gconstpointer b_p)
 {
     int ret;
-    const struct PoolTask *a = a_p;
-    const struct PoolTask *b = b_p;
+    const struct PoolTask *a = *(struct PoolTask **) a_p;
+    const struct PoolTask *b = *(struct PoolTask **) b_p;
     ret = g_strcmp0(a->filename, b->filename);
     if (ret) return ret;
     return g_strcmp0(a->path, b->path);
@@ -141,7 +152,7 @@ fill_pool(GThreadPool *pool,
           long *task_count,
           int  media_id)
 {
-    GQueue queue = G_QUEUE_INIT;
+    GArray *package_tasks = g_array_new(FALSE, FALSE, sizeof(struct PoolTask *));
     struct PoolTask *task;
 
     if ( ! cmd_options->split ) {
@@ -241,7 +252,7 @@ fill_pool(GThreadPool *pool,
                     task->path = g_strdup(dirname);
                     *current_pkglist = g_slist_prepend(*current_pkglist, task->filename);
                     // TODO: One common path for all tasks with the same path?
-                    g_queue_insert_sorted(&queue, task, task_cmp, NULL);
+                    g_array_append_val(package_tasks, task);
                 } else {
                     g_free(full_path);
                 }
@@ -297,18 +308,23 @@ fill_pool(GThreadPool *pool,
                 task->filename  = g_strdup(filename);         // foobar.rpm
                 task->path      = strndup(relative_path, x);  // packages/i386/
                 *current_pkglist = g_slist_prepend(*current_pkglist, task->filename);
-                g_queue_insert_sorted(&queue, task, task_cmp, NULL);
+                g_array_append_val(package_tasks, task);
             }
         }
     }
 
+    g_array_sort(package_tasks, task_cmp);
+
     // Push sorted tasks into the thread pool
-    while ((task = g_queue_pop_head(&queue)) != NULL) {
+    for (int i=0; i<package_tasks->len; i++) {
+        task = g_array_index(package_tasks, struct PoolTask *, i);
         task->id = *task_count;
         task->media_id = media_id;
         g_thread_pool_push(pool, task, NULL);
         ++*task_count;
     }
+
+    g_array_free(package_tasks, TRUE);
 
     return *task_count;
 }
@@ -366,69 +382,11 @@ prepare_cache_dir(struct CmdOptions *cmd_options,
     return TRUE;
 }
 
-/** Adds groupfile cr_RepomdRecords to additional_metadata_rec list.
- *  Groupfile is a special case, because it's the only metadatum
- *  that can be inputed to createrepo_c via command line option.
- *
- * @param group_metadatum           Cr_Metadatum for used groupfile
- * @param additional_metadata_rec   GSList of cr_RepomdRecords
- * @param comp_type                 Groupfile compression type
- * @param repomd_checksum_type
- *
- * @return                          GSList with added cr_RepomdRecords for
- *                                  groupfile
- */
-GSList*
-cr_create_repomd_records_for_groupfile_metadata(const cr_Metadatum *group_metadatum,
-                                                GSList *additional_metadata_rec,
-                                                cr_CompressionType comp_type,
-                                                cr_ChecksumType repomd_checksum_type)
-{
-    GError *tmp_err = NULL;
-    char *compression_suffix = g_strdup(cr_compression_suffix(comp_type));
-    compression_suffix[0] = '_'; //replace '.'
-    additional_metadata_rec = g_slist_prepend(additional_metadata_rec,
-                                              cr_repomd_record_new(
-                                                  group_metadatum->type,
-                                                  group_metadatum->name
-                                              ));
-
-    gchar *compressed_record_type = g_strconcat(group_metadatum->type, compression_suffix, NULL);
-    additional_metadata_rec = g_slist_prepend(additional_metadata_rec,
-                                              cr_repomd_record_new(
-                                                  compressed_record_type,
-                                                  NULL
-                                              ));
-
-    cr_repomd_record_compress_and_fill(additional_metadata_rec->next->data,
-                                       additional_metadata_rec->data,
-                                       repomd_checksum_type,
-                                       comp_type,
-                                       NULL,
-                                       &tmp_err);
-
-    if (tmp_err) {
-        g_critical("Cannot process %s %s: %s",
-                   group_metadatum->type,
-                   group_metadatum->name,
-                   tmp_err->message);
-        g_free(compression_suffix);
-        g_free(compressed_record_type);
-        g_clear_error(&tmp_err);
-        exit(EXIT_FAILURE);
-    }
-
-    g_free(compressed_record_type);
-    g_free(compression_suffix);
-
-    return additional_metadata_rec;
-}
-
 /** Creates list of cr_RepomdRecords from list
- *  of additional metadata (cr_Metadatum) 
+ *  of additional metadata (cr_Metadatum)
  *
  * @param additional_metadata       List of cr_Metadatum
- * @param repomd_checksum_type      
+ * @param repomd_checksum_type
  *
  * @return                          New GSList of cr_RepomdRecords
  */
@@ -437,7 +395,7 @@ cr_create_repomd_records_for_additional_metadata(GSList *additional_metadata,
                                                  cr_ChecksumType repomd_checksum_type)
 {
     GError *tmp_err = NULL;
-    GSList *additional_metadata_rec = NULL; 
+    GSList *additional_metadata_rec = NULL;
     GSList *element = additional_metadata;
     for (; element; element=g_slist_next(element)) {
         additional_metadata_rec = g_slist_prepend(additional_metadata_rec,
@@ -466,9 +424,9 @@ cr_create_repomd_records_for_additional_metadata(GSList *additional_metadata,
  *  use content stats of the new file
  *
  * @param task          Rewrite pkg count task
- * @param filename      Name of file with wrong package count 
+ * @param filename      Name of file with wrong package count
  * @param exit_val      If errors occured set createrepo_c exit value
- * @param content_stat  Content stats for filename    
+ * @param content_stat  Content stats for filename
  *
  */
 static void
@@ -546,6 +504,92 @@ load_old_metadata(cr_Metadata **md,
     g_message("Loaded information about %d packages",
               g_hash_table_size(cr_metadata_hashtable(*md)));
 }
+
+// Sorting function for location_href strings, by length.
+// Compatible with g_array_sort()
+static int strlensort(gconstpointer a, gconstpointer b)
+{
+    // Function is supposed to take a double-pointer so unfortunately you cannot pass a
+    // string-comparison function directly.
+    gchar **a_ptr = (gchar **)a;
+    gchar **b_ptr = (gchar **)b;
+
+    int a_len = strnlen(*a_ptr, 4096);
+    int b_len = strnlen(*b_ptr, 4096);
+    if (a_len > b_len)
+    {
+        return 1;
+    }
+    else if (b_len > a_len)
+    {
+        return -1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+// Sorting function for DuplicateLocation pointers, by pkg build time.
+// Compatible with g_array_sort()
+static int buildtimesort(gconstpointer a, gconstpointer b)
+{
+    // Function is supposed to take a double-pointer so unfortunately you cannot pass a
+    // string-comparison function directly.
+    struct DuplicateLocation *a_loc = (struct DuplicateLocation *)a;
+    struct DuplicateLocation *b_loc = (struct DuplicateLocation *)b;
+
+    assert(a_loc->pkg->time_build != 0);
+    assert(b_loc->pkg->time_build != 0);
+
+    // order by build time first
+    int64_t result = a_loc->pkg->time_build - b_loc->pkg->time_build;
+    if (result)
+        return result;
+
+    // and then alphabetically by the rpm location
+    return g_strcmp0(a_loc->location, b_loc->location);
+}
+
+
+static int
+handle_nevra_duplicates(GArray *locations, CmdDupNevra option)
+{
+    int skipped = 0;
+    for (size_t i=0; i<locations->len; i++) {
+        struct DuplicateLocation location = g_array_index(
+                locations, struct DuplicateLocation, i);
+        if (option == CR_ARG_DUP_NEVRA_KEEP_LAST) {
+            if (i < locations->len - 1) {
+                location.pkg->skip_dump = TRUE;
+                skipped += 1;
+            }
+        }
+    }
+    return skipped;
+}
+
+
+static void
+duplicates_warning(const char *nevra, GArray *locations, CmdDupNevra option)
+{
+  g_warning("Package '%s' has duplicate metadata entries, only one should exist", nevra);
+
+  char *skip_reason= "";
+  if (option == CR_ARG_DUP_NEVRA_KEEP_LAST) {
+      skip_reason = " (not dumped, 'keep-last')";
+  }
+  for (size_t i=0; i<locations->len; i++) {
+      struct DuplicateLocation location = g_array_index(locations, struct
+                                                        DuplicateLocation, i);
+      g_warning("    Sourced from location: \'%s\', build timestamp: %jd%s",
+                location.location,
+                (intmax_t) location.pkg->time_build,
+                location.pkg->skip_dump ? skip_reason : "");
+
+  }
+}
+
 
 int
 main(int argc, char **argv)
@@ -707,6 +751,7 @@ main(int argc, char **argv)
     g_debug("Thread pool ready");
 
     long task_count = 0;
+    long package_count_in_headers = 0;
     GSList *current_pkglist = NULL;
     /* ^^^ List with basenames of files which will be processed */
 
@@ -752,6 +797,16 @@ main(int argc, char **argv)
     g_debug("Package count: %ld", task_count);
     g_message("Directory walk done - %ld packages", task_count);
 
+    if (cmd_options->nevra_duplicates)
+        // we need to construct the large table of cr_Packages to analyse
+        // all the NEVRAs together.
+        cmd_options->delayed_dump = TRUE;
+
+    user_data.task_count        = task_count;
+    if (cmd_options->delayed_dump)
+        // call this when we know the expected task_count
+        cr_delayed_dump_set(&user_data);
+
     if (cmd_options->update) {
         if (old_metadata)
             g_debug("Old metadata already loaded.");
@@ -775,9 +830,9 @@ main(int argc, char **argv)
     const char *xml_compression_suffix = NULL;
     const char *sqlite_compression_suffix = NULL;
     const char *compression_suffix = NULL;
-    cr_CompressionType xml_compression = CR_CW_GZ_COMPRESSION;
+    cr_CompressionType xml_compression = CR_CW_ZSTD_COMPRESSION;
     cr_CompressionType sqlite_compression = CR_CW_BZ2_COMPRESSION;
-    cr_CompressionType compression = CR_CW_GZ_COMPRESSION;
+    cr_CompressionType compression = CR_CW_ZSTD_COMPRESSION;
 
     if (cmd_options->compression_type != CR_CW_UNKNOWN_COMPRESSION) {
         sqlite_compression = cmd_options->compression_type;
@@ -794,13 +849,14 @@ main(int argc, char **argv)
     sqlite_compression_suffix = cr_compression_suffix(sqlite_compression);
     compression_suffix = cr_compression_suffix(compression);
 
-    cr_Metadatum *new_groupfile_metadatum = NULL;
-
-    // Groupfile specified as argument 
+    // Groupfile specified as argument
     if (cmd_options->groupfile_fullpath) {
-        new_groupfile_metadatum = g_malloc0(sizeof(cr_Metadatum));
-        new_groupfile_metadatum->name = cr_copy_metadatum(cmd_options->groupfile_fullpath, tmp_out_repo, &tmp_err);
+        gchar *compressed_path = cr_compress_groupfile(cmd_options->groupfile_fullpath, tmp_out_repo, compression);
+        cr_Metadatum *new_groupfile_metadatum = g_malloc0(sizeof(cr_Metadatum));
+        new_groupfile_metadatum->name = compressed_path;
         new_groupfile_metadatum->type = g_strdup("group");
+        additional_metadata = g_slist_prepend(additional_metadata, new_groupfile_metadatum);
+
         //remove old groupfile(s) (every [compressed] variant)
         if (old_metadata_location){
             GSList *node_iter = old_metadata_location->additional_metadata;
@@ -820,45 +876,18 @@ main(int argc, char **argv)
 #ifdef WITH_LIBMODULEMD
     // module metadata found in repo
     if (cmd_options->modulemd_metadata) {
+        gboolean merger_is_empty = TRUE;
         ModulemdModuleIndexMerger *merger = modulemd_module_index_merger_new();
         if (!merger) {
             g_critical("Could not allocate module merger");
             exit(EXIT_FAILURE);
         }
-        ModulemdModuleIndex *moduleindex;
 
-        //load all found module metatada and associate it with merger
-        GSList *element = cmd_options->modulemd_metadata;
-        for (; element; element=g_slist_next(element)) {
-            moduleindex = modulemd_module_index_new();
-            if (!moduleindex) {
-                g_critical("Could not allocate new module index");
-                g_clear_pointer(&merger, g_object_unref);
-                exit(EXIT_FAILURE);
-            }
-            g_autoptr (GPtrArray) failures = NULL;
-            gboolean result = modulemd_module_index_update_from_file(moduleindex,
-                                                                     ((char *) element->data),
-                                                                     TRUE,
-                                                                     &failures,
-                                                                     &tmp_err);
-            if (!result) {
-                g_critical("Could not update module index from file %s: %s", (char *) element->data,
-                           (tmp_err ? tmp_err->message : "Unknown error"));
-                g_clear_error(&tmp_err);
-                g_clear_pointer(&moduleindex, g_object_unref);
-                g_clear_pointer(&merger, g_object_unref);
-                exit(EXIT_FAILURE);
-            }
-            modulemd_module_index_merger_associate_index(merger, moduleindex, 0);
-            g_clear_pointer(&moduleindex, g_object_unref);
-        }
-
-        if (cmd_options->update && cmd_options->keep_all_metadata &&
-        old_metadata_location && old_metadata_location->additional_metadata){
-            //associate old metadata into the merger
-            if (cr_metadata_modulemd(old_metadata)){
+        if (cmd_options->update && old_metadata_location && old_metadata_location->additional_metadata){
+            //associate old metadata into the merger if we want to keep them (--keep-all-metadata)
+            if (cr_metadata_modulemd(old_metadata) && cmd_options->keep_all_metadata){
                 modulemd_module_index_merger_associate_index(merger, cr_metadata_modulemd(old_metadata), 0);
+                merger_is_empty = FALSE;
                 if (tmp_err) {
                     g_critical("%s: Cannot merge old module index with new: %s", __func__, tmp_err->message);
                     g_clear_error(&tmp_err);
@@ -871,6 +900,24 @@ main(int argc, char **argv)
             while (node_iter != NULL){
                 GSList *next = g_slist_next(node_iter);
                 cr_Metadatum *m = node_iter->data;
+
+                /* If we are updating some existing repodata that have modular metadata
+                 * remove those from found cmd_options->modulemd_metadata.
+                 * If --keel-all-metadata is not specified we don't want them and if it is they
+                 * were already added from old_metadata module index above.
+                 */
+                GSList *element_iter = cmd_options->modulemd_metadata;
+                while (element_iter != NULL){
+                    GSList *next_inner = g_slist_next(element_iter);
+                    gchar *path_to_found_md = (gchar *) element_iter->data;
+                    if (!g_strcmp0(path_to_found_md, m->name)) {
+                        g_free(path_to_found_md);
+                        cmd_options->modulemd_metadata = g_slist_delete_link(
+                            cmd_options->modulemd_metadata, element_iter);
+                    }
+                    element_iter = next_inner;
+                }
+
                 if(g_str_has_prefix(m->type, "modules")){
                     old_metadata_location->additional_metadata = g_slist_delete_link(
                         old_metadata_location->additional_metadata, node_iter);
@@ -880,45 +927,72 @@ main(int argc, char **argv)
             }
         }
 
-        //merge module metadata and dump it to string
-        moduleindex = modulemd_module_index_merger_resolve (merger, &tmp_err);
+        ModulemdModuleIndex *moduleindex;
+
+        //load all found module metatada and associate it with merger
+        GSList *element = cmd_options->modulemd_metadata;
+        for (; element; element=g_slist_next(element)) {
+            int result = cr_metadata_load_modulemd(&moduleindex, (char *) element->data, &tmp_err);
+            if (result != CRE_OK) {
+                g_critical("Could not load module index file %s: %s", (char *) element->data,
+                           (tmp_err ? tmp_err->message : "Unknown error"));
+                g_clear_error(&tmp_err);
+                g_clear_pointer(&moduleindex, g_object_unref);
+                g_clear_pointer(&merger, g_object_unref);
+                exit(EXIT_FAILURE);
+            }
+
+            modulemd_module_index_merger_associate_index(merger, moduleindex, 0);
+            merger_is_empty = FALSE;
+            g_clear_pointer(&moduleindex, g_object_unref);
+        }
+
+        if (!merger_is_empty) {
+            //merge module metadata and dump it to string
+            moduleindex = modulemd_module_index_merger_resolve (merger, &tmp_err);
+            char *moduleindex_str = modulemd_module_index_dump_to_string (moduleindex, &tmp_err);
+            g_clear_pointer(&moduleindex, g_object_unref);
+            if (tmp_err) {
+                g_critical("%s: Cannot dump module index: %s", __func__, tmp_err->message);
+                free(moduleindex_str);
+                g_clear_error(&tmp_err);
+                g_clear_pointer(&merger, g_object_unref);
+                exit(EXIT_FAILURE);
+            }
+
+            //compress new module metadata string to a file in temporary .repodata
+            gchar *modules_metadata_path = g_strconcat(tmp_out_repo, "modules.yaml", compression_suffix, NULL);
+            CR_FILE *modules_file = NULL;
+            modules_file = cr_open(modules_metadata_path, CR_CW_MODE_WRITE, compression, &tmp_err);
+            if (modules_file == NULL) {
+                g_critical("%s: Cannot open source file %s: %s", __func__, modules_metadata_path,
+                           (tmp_err ? tmp_err->message : "Unknown error"));
+                g_clear_error(&tmp_err);
+                free(moduleindex_str);
+                g_free(modules_metadata_path);
+                g_clear_pointer(&merger, g_object_unref);
+                exit(EXIT_FAILURE);
+            }
+            cr_puts(modules_file, moduleindex_str, &tmp_err);
+            free(moduleindex_str);
+            cr_close(modules_file, &tmp_err);
+            if (tmp_err) {
+                g_critical("%s: Error while closing: : %s", __func__, tmp_err->message);
+                g_clear_error(&tmp_err);
+                g_free(modules_metadata_path);
+                g_clear_pointer(&merger, g_object_unref);
+                exit(EXIT_FAILURE);
+            }
+
+            //create additional metadatum for new module metadata file
+            cr_Metadatum *new_modules_metadatum = g_malloc0(sizeof(cr_Metadatum));
+            new_modules_metadatum->name = modules_metadata_path;
+            new_modules_metadatum->type = g_strdup("modules");
+            additional_metadata = g_slist_prepend(additional_metadata, new_modules_metadatum);
+        }
+
         g_clear_pointer(&merger, g_object_unref);
-        char *moduleindex_str = modulemd_module_index_dump_to_string (moduleindex, &tmp_err);
-        g_clear_pointer(&moduleindex, g_object_unref);
-        if (tmp_err) {
-            g_critical("%s: Cannot dump module index: %s", __func__, tmp_err->message);
-            free(moduleindex_str);
-            g_clear_error(&tmp_err);
-            exit(EXIT_FAILURE);
-        }
 
-        //compress new module metadata string to a file in temporary .repodata
-        gchar *modules_metadata_path = g_strconcat(tmp_out_repo, "modules.yaml", compression_suffix, NULL);
-        CR_FILE *modules_file = NULL;
-        modules_file = cr_open(modules_metadata_path, CR_CW_MODE_WRITE, compression, &tmp_err);
-        if (modules_file == NULL) {
-            g_critical("%s: Cannot open source file %s: %s", __func__, modules_metadata_path,
-                       (tmp_err ? tmp_err->message : "Unknown error"));
-            g_clear_error(&tmp_err);
-            free(moduleindex_str);
-            free(modules_metadata_path);
-            exit(EXIT_FAILURE);
-        }
-        cr_puts(modules_file, moduleindex_str, &tmp_err);
-        free(moduleindex_str);
-        cr_close(modules_file, &tmp_err);
-        if (tmp_err) {
-            g_critical("%s: Error while closing: : %s", __func__, tmp_err->message);
-            g_clear_error(&tmp_err);
-            free(modules_metadata_path);
-            exit(EXIT_FAILURE);
-        }
-
-        //create additional metadatum for new module metadata file
-        cr_Metadatum *new_modules_metadatum = g_malloc0(sizeof(cr_Metadatum));
-        new_modules_metadatum->name = modules_metadata_path;
-        new_modules_metadatum->type = g_strdup("modules");
-        additional_metadata = g_slist_prepend(additional_metadata, new_modules_metadatum);
     }
 #endif /* WITH_LIBMODULEMD */
 
@@ -935,27 +1009,29 @@ main(int argc, char **argv)
         }
     }
 
-    cr_metadatalocation_free(old_metadata_location);
-    old_metadata_location = NULL;
-
     // Create and open new compressed files
-    cr_XmlFile *pri_cr_file;
-    cr_XmlFile *fil_cr_file;
-    cr_XmlFile *oth_cr_file;
+    cr_XmlFile *pri_cr_file = NULL;
+    cr_XmlFile *fil_cr_file = NULL;
+    cr_XmlFile *fex_cr_file = NULL;
+    cr_XmlFile *oth_cr_file = NULL;
 
-    cr_ContentStat *pri_stat;
-    cr_ContentStat *fil_stat;
-    cr_ContentStat *oth_stat;
+    cr_ContentStat *pri_stat = NULL;
+    cr_ContentStat *fil_stat = NULL;
+    cr_ContentStat *fex_stat = NULL;
+    cr_ContentStat *oth_stat = NULL;
 
-    gchar *pri_xml_filename;
-    gchar *fil_xml_filename;
-    gchar *oth_xml_filename;
+    gchar *pri_xml_filename = NULL;
+    gchar *fil_xml_filename = NULL;
+    gchar *fex_xml_filename = NULL;
+    gchar *oth_xml_filename = NULL;
 
     g_message("Temporary output repo path: %s", tmp_out_repo);
-    g_debug("Creating .xml.gz files");
+    g_debug("Creating .xml.%s files", xml_compression_suffix);
 
     pri_xml_filename = g_strconcat(tmp_out_repo, "/primary.xml", xml_compression_suffix, NULL);
     fil_xml_filename = g_strconcat(tmp_out_repo, "/filelists.xml", xml_compression_suffix, NULL);
+    if (cmd_options->filelists_ext)
+        fex_xml_filename = g_strconcat(tmp_out_repo, "/filelists-ext.xml", xml_compression_suffix, NULL);
     oth_xml_filename = g_strconcat(tmp_out_repo, "/other.xml", xml_compression_suffix, NULL);
 
     pri_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
@@ -971,6 +1047,7 @@ main(int argc, char **argv)
         cr_contentstat_free(pri_stat, NULL);
         g_free(pri_xml_filename);
         g_free(fil_xml_filename);
+        g_free(fex_xml_filename);
         g_free(oth_xml_filename);
         exit(EXIT_FAILURE);
     }
@@ -989,9 +1066,34 @@ main(int argc, char **argv)
         cr_contentstat_free(fil_stat, NULL);
         g_free(pri_xml_filename);
         g_free(fil_xml_filename);
+        g_free(fex_xml_filename);
         g_free(oth_xml_filename);
         cr_xmlfile_close(pri_cr_file, NULL);
         exit(EXIT_FAILURE);
+    }
+
+    if (cmd_options->filelists_ext) {
+        fex_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
+        fex_cr_file = cr_xmlfile_sopen_filelists_ext(fex_xml_filename,
+                                                    xml_compression,
+                                                    fex_stat,
+                                                    &tmp_err);
+        assert(fex_cr_file || tmp_err);
+        if (!fex_cr_file) {
+            g_critical("Cannot open file %s: %s",
+                       fex_xml_filename, tmp_err->message);
+            g_clear_error(&tmp_err);
+            cr_contentstat_free(pri_stat, NULL);
+            cr_contentstat_free(fil_stat, NULL);
+            cr_contentstat_free(fex_stat, NULL);
+            g_free(pri_xml_filename);
+            g_free(fil_xml_filename);
+            g_free(fex_xml_filename);
+            g_free(oth_xml_filename);
+            cr_xmlfile_close(fil_cr_file, NULL);
+            cr_xmlfile_close(pri_cr_file, NULL);
+            exit(EXIT_FAILURE);
+        }
     }
 
     oth_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
@@ -1006,10 +1108,13 @@ main(int argc, char **argv)
         g_clear_error(&tmp_err);
         cr_contentstat_free(pri_stat, NULL);
         cr_contentstat_free(fil_stat, NULL);
+        cr_contentstat_free(fex_stat, NULL);
         cr_contentstat_free(oth_stat, NULL);
         g_free(pri_xml_filename);
         g_free(fil_xml_filename);
+        g_free(fex_xml_filename);
         g_free(oth_xml_filename);
+        cr_xmlfile_close(fex_cr_file, NULL);
         cr_xmlfile_close(fil_cr_file, NULL);
         cr_xmlfile_close(pri_cr_file, NULL);
         exit(EXIT_FAILURE);
@@ -1017,21 +1122,29 @@ main(int argc, char **argv)
 
     // Set number of packages
     g_debug("Setting number of packages");
-    cr_xmlfile_set_num_of_pkgs(pri_cr_file, task_count, NULL);
-    cr_xmlfile_set_num_of_pkgs(fil_cr_file, task_count, NULL);
-    cr_xmlfile_set_num_of_pkgs(oth_cr_file, task_count, NULL);
+    if (!cmd_options->delayed_dump) {
+        cr_xmlfile_set_num_of_pkgs(pri_cr_file, task_count, NULL);
+        cr_xmlfile_set_num_of_pkgs(fil_cr_file, task_count, NULL);
+	if (cmd_options->filelists_ext)
+            cr_xmlfile_set_num_of_pkgs(fex_cr_file, task_count, NULL);
+        cr_xmlfile_set_num_of_pkgs(oth_cr_file, task_count, NULL);
+        package_count_in_headers = task_count;
+    }
 
     // Open sqlite databases
     gchar *pri_db_filename = NULL;
     gchar *fil_db_filename = NULL;
+    gchar *fex_db_filename = NULL;
     gchar *oth_db_filename = NULL;
     cr_SqliteDb *pri_db = NULL;
     cr_SqliteDb *fil_db = NULL;
+    cr_SqliteDb *fex_db = NULL;
     cr_SqliteDb *oth_db = NULL;
 
-    if (!cmd_options->no_database) {
+    if (cmd_options->database) {
         _cleanup_file_close_ int pri_db_fd = -1;
         _cleanup_file_close_ int fil_db_fd = -1;
+        _cleanup_file_close_ int fex_db_fd = -1;
         _cleanup_file_close_ int oth_db_fd = -1;
 
         g_message("Preparing sqlite DBs");
@@ -1039,12 +1152,16 @@ main(int argc, char **argv)
             g_debug("Creating databases");
             pri_db_filename = g_strconcat(tmp_out_repo, "/primary.sqlite", NULL);
             fil_db_filename = g_strconcat(tmp_out_repo, "/filelists.sqlite", NULL);
+	    if (cmd_options->filelists_ext)
+                fex_db_filename = g_strconcat(tmp_out_repo, "/filelists-ext.sqlite", NULL);
             oth_db_filename = g_strconcat(tmp_out_repo, "/other.sqlite", NULL);
         } else {
             g_debug("Creating databases localy");
             const gchar *tmpdir = g_get_tmp_dir();
             pri_db_filename = g_build_filename(tmpdir, "primary.XXXXXX.sqlite", NULL);
             fil_db_filename = g_build_filename(tmpdir, "filelists.XXXXXX.sqlite", NULL);
+	    if (cmd_options->filelists_ext)
+                fex_db_filename = g_build_filename(tmpdir, "filelists-ext.XXXXXX.sqlite", NULL);
             oth_db_filename = g_build_filename(tmpdir, "other.XXXXXXX.sqlite", NULL);
             pri_db_fd = g_mkstemp(pri_db_filename);
             g_debug("%s", pri_db_filename);
@@ -1057,6 +1174,14 @@ main(int argc, char **argv)
             if (fil_db_fd == -1) {
                 g_critical("Cannot open %s: %s", fil_db_filename, g_strerror(errno));
                 exit(EXIT_FAILURE);
+            }
+            if (cmd_options->filelists_ext) {
+                fex_db_fd = g_mkstemp(fex_db_filename);
+                 g_debug("%s", fex_db_filename);
+                if (fex_db_fd == -1) {
+                    g_critical("Cannot open %s: %s", fex_db_filename, g_strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
             }
             oth_db_fd = g_mkstemp(oth_db_filename);
             g_debug("%s", oth_db_filename);
@@ -1084,6 +1209,21 @@ main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
 
+        if (cmd_options->filelists_ext) {
+            // TODO(aplanas): For now, the SQListe database for
+            // filenames_ext will be the same that for filenames,
+            // until we decide how will be the schema change.
+            // fex_db = cr_db_open_filelists_ext(fex_db_filename, &tmp_err);
+            fex_db = cr_db_open_filelists(fex_db_filename, &tmp_err);
+            assert(fex_db || tmp_err);
+            if (!fex_db) {
+                g_critical("Cannot open %s: %s",
+                           fex_db_filename, tmp_err->message);
+                g_clear_error(&tmp_err);
+                exit(EXIT_FAILURE);
+            }
+        }
+
         oth_db = cr_db_open_other(oth_db_filename, &tmp_err);
         assert(oth_db || tmp_err);
         if (!oth_db) {
@@ -1096,21 +1236,27 @@ main(int argc, char **argv)
 
     gchar *pri_zck_filename = NULL;
     gchar *fil_zck_filename = NULL;
+    gchar *fex_zck_filename = NULL;
     gchar *oth_zck_filename = NULL;
     cr_XmlFile *pri_cr_zck = NULL;
     cr_XmlFile *fil_cr_zck = NULL;
+    cr_XmlFile *fex_cr_zck = NULL;
     cr_XmlFile *oth_cr_zck = NULL;
     cr_ContentStat *pri_zck_stat = NULL;
     cr_ContentStat *fil_zck_stat = NULL;
+    cr_ContentStat *fex_zck_stat = NULL;
     cr_ContentStat *oth_zck_stat = NULL;
     gchar *pri_dict = NULL;
     gchar *fil_dict = NULL;
+    gchar *fex_dict = NULL;
     gchar *oth_dict = NULL;
     size_t pri_dict_size = 0;
     size_t fil_dict_size = 0;
+    size_t fex_dict_size = 0;
     size_t oth_dict_size = 0;
     gchar *pri_dict_file = NULL;
     gchar *fil_dict_file = NULL;
+    gchar *fex_dict_file = NULL;
     gchar *oth_dict_file = NULL;
 
     if (cmd_options->zck_dict_dir) {
@@ -1118,6 +1264,9 @@ main(int argc, char **argv)
                                          "primary.xml");
         fil_dict_file = cr_get_dict_file(cmd_options->zck_dict_dir,
                                          "filelists.xml");
+	if (cmd_options->filelists_ext)
+            fex_dict_file = cr_get_dict_file(cmd_options->zck_dict_dir,
+                                             "filelists-ext.xml");
         oth_dict_file = cr_get_dict_file(cmd_options->zck_dict_dir,
                                          "other.xml");
         if (pri_dict_file && !g_file_get_contents(pri_dict_file, &pri_dict,
@@ -1134,6 +1283,13 @@ main(int argc, char **argv)
             g_clear_error(&tmp_err);
             exit(EXIT_FAILURE);
         }
+        if (fex_dict_file && !g_file_get_contents(fex_dict_file, &fex_dict,
+                                                 &fex_dict_size, &tmp_err)) {
+            g_critical("Error reading zchunk filelists dict %s: %s",
+                       fex_dict_file, tmp_err->message);
+            g_clear_error(&tmp_err);
+            exit(EXIT_FAILURE);
+	}
         if (oth_dict_file && !g_file_get_contents(oth_dict_file, &oth_dict,
                                                  &oth_dict_size, &tmp_err)) {
             g_critical("Error reading zchunk other dict %s: %s",
@@ -1147,6 +1303,8 @@ main(int argc, char **argv)
 
         pri_zck_filename = g_strconcat(tmp_out_repo, "/primary.xml.zck", NULL);
         fil_zck_filename = g_strconcat(tmp_out_repo, "/filelists.xml.zck", NULL);
+	if (cmd_options->filelists_ext)
+            fex_zck_filename = g_strconcat(tmp_out_repo, "/filelists-ext.xml.zck", NULL);
         oth_zck_filename = g_strconcat(tmp_out_repo, "/other.xml.zck", NULL);
 
         pri_zck_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
@@ -1162,6 +1320,7 @@ main(int argc, char **argv)
             cr_contentstat_free(pri_zck_stat, NULL);
             g_free(pri_zck_filename);
             g_free(fil_zck_filename);
+            g_free(fex_zck_filename);
             g_free(oth_zck_filename);
             exit(EXIT_FAILURE);
         }
@@ -1188,6 +1347,7 @@ main(int argc, char **argv)
             cr_contentstat_free(fil_zck_stat, NULL);
             g_free(pri_zck_filename);
             g_free(fil_zck_filename);
+            g_free(fex_zck_filename);
             g_free(oth_zck_filename);
             cr_xmlfile_close(pri_cr_zck, NULL);
             exit(EXIT_FAILURE);
@@ -1201,6 +1361,37 @@ main(int argc, char **argv)
         }
         g_free(fil_dict);
 
+        if (cmd_options->filelists_ext) {
+            fex_zck_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
+            fex_cr_zck = cr_xmlfile_sopen_filelists_ext(fex_zck_filename,
+                                                        CR_CW_ZCK_COMPRESSION,
+                                                        fex_zck_stat,
+                                                        &tmp_err);
+            assert(fex_cr_zck || tmp_err);
+            if (!fex_cr_zck) {
+                g_critical("Cannot open file %s: %s",
+                           fex_zck_filename, tmp_err->message);
+                g_clear_error(&tmp_err);
+                cr_contentstat_free(pri_zck_stat, NULL);
+                cr_contentstat_free(fil_zck_stat, NULL);
+                cr_contentstat_free(fex_zck_stat, NULL);
+                g_free(pri_zck_filename);
+                g_free(fil_zck_filename);
+                g_free(fex_zck_filename);
+                g_free(oth_zck_filename);
+                cr_xmlfile_close(pri_cr_zck, NULL);
+                exit(EXIT_FAILURE);
+            }
+            cr_set_dict(fex_cr_zck->f, fex_dict, fex_dict_size, &tmp_err);
+            if (tmp_err) {
+                g_critical("Error reading setting filelists-ext dict %s: %s",
+                           fex_dict_file, tmp_err->message);
+                g_clear_error(&tmp_err);
+                exit(EXIT_FAILURE);
+            }
+            g_free(fex_dict);
+        }
+
         oth_zck_stat = cr_contentstat_new(cmd_options->repomd_checksum_type, NULL);
         oth_cr_zck = cr_xmlfile_sopen_other(oth_zck_filename,
                                             CR_CW_ZCK_COMPRESSION,
@@ -1213,10 +1404,13 @@ main(int argc, char **argv)
             g_clear_error(&tmp_err);
             cr_contentstat_free(pri_zck_stat, NULL);
             cr_contentstat_free(fil_zck_stat, NULL);
+            cr_contentstat_free(fex_zck_stat, NULL);
             cr_contentstat_free(oth_zck_stat, NULL);
             g_free(pri_zck_filename);
             g_free(fil_zck_filename);
+            g_free(fex_zck_filename);
             g_free(oth_zck_filename);
+            cr_xmlfile_close(fex_cr_zck, NULL);
             cr_xmlfile_close(fil_cr_zck, NULL);
             cr_xmlfile_close(pri_cr_zck, NULL);
             exit(EXIT_FAILURE);
@@ -1232,38 +1426,47 @@ main(int argc, char **argv)
 
         // Set number of packages
         g_debug("Setting number of packages");
-        cr_xmlfile_set_num_of_pkgs(pri_cr_zck, task_count, NULL);
-        cr_xmlfile_set_num_of_pkgs(fil_cr_zck, task_count, NULL);
-        cr_xmlfile_set_num_of_pkgs(oth_cr_zck, task_count, NULL);
+        if (!cmd_options->delayed_dump) {
+            cr_xmlfile_set_num_of_pkgs(pri_cr_zck, task_count, NULL);
+            cr_xmlfile_set_num_of_pkgs(fil_cr_zck, task_count, NULL);
+            if (cmd_options->filelists_ext)
+                cr_xmlfile_set_num_of_pkgs(fex_cr_zck, task_count, NULL);
+            cr_xmlfile_set_num_of_pkgs(oth_cr_zck, task_count, NULL);
+        }
     }
 
     // Thread pool - User data initialization
     user_data.pri_f             = pri_cr_file;
     user_data.fil_f             = fil_cr_file;
+    user_data.fex_f             = fex_cr_file;
     user_data.oth_f             = oth_cr_file;
     user_data.pri_db            = pri_db;
     user_data.fil_db            = fil_db;
+    user_data.fex_db            = fex_db;
     user_data.oth_db            = oth_db;
     user_data.pri_zck           = pri_cr_zck;
     user_data.fil_zck           = fil_cr_zck;
+    user_data.fex_zck           = fex_cr_zck;
     user_data.oth_zck           = oth_cr_zck;
     if (cmd_options->compatibility && cmd_options->changelog_limit == DEFAULT_CHANGELOG_LIMIT ) {
-      user_data.changelog_limit   = -1;
+      user_data.changelog_limit = -1;
     } else {
-      user_data.changelog_limit   = cmd_options->changelog_limit;
+      user_data.changelog_limit = cmd_options->changelog_limit;
     }
     user_data.location_base     = cmd_options->location_base;
     user_data.checksum_type_str = cr_checksum_name_str(cmd_options->checksum_type);
     user_data.checksum_type     = cmd_options->checksum_type;
     user_data.checksum_cachedir = cmd_options->checksum_cachedir;
     user_data.skip_symlinks     = cmd_options->skip_symlinks;
+    user_data.filelists_ext     = cmd_options->filelists_ext;
     user_data.repodir_name_len  = strlen(in_dir);
-    user_data.task_count        = task_count;
     user_data.package_count     = 0;
+    user_data.nevra_table       = g_hash_table_new(g_str_hash, g_str_equal);
     user_data.skip_stat         = cmd_options->skip_stat;
     user_data.old_metadata      = old_metadata;
     user_data.id_pri            = 0;
     user_data.id_fil            = 0;
+    user_data.id_fex            = 0;
     user_data.id_oth            = 0;
     user_data.buffer            = g_queue_new();
     user_data.deltas            = cmd_options->deltas;
@@ -1274,12 +1477,15 @@ main(int argc, char **argv)
     user_data.had_errors        = 0;
     user_data.output_pkg_list   = output_pkg_list;
 
+    g_mutex_init(&(user_data.mutex_nevra_table));
     g_mutex_init(&(user_data.mutex_output_pkg_list));
     g_mutex_init(&(user_data.mutex_pri));
     g_mutex_init(&(user_data.mutex_fil));
+    g_mutex_init(&(user_data.mutex_fex));
     g_mutex_init(&(user_data.mutex_oth));
     g_cond_init(&(user_data.cond_pri));
     g_cond_init(&(user_data.cond_fil));
+    g_cond_init(&(user_data.cond_fex));
     g_cond_init(&(user_data.cond_oth));
     g_mutex_init(&(user_data.mutex_buffer));
     g_mutex_init(&(user_data.mutex_old_md));
@@ -1294,9 +1500,62 @@ main(int argc, char **argv)
     // Wait until pool is finished
     g_thread_pool_free(pool, FALSE, TRUE);
 
+    GHashTableIter iter;
+    gpointer key, value;
+
+    int skipped_pkgs = 0;
+    g_hash_table_iter_init(&iter, user_data.nevra_table);
+    while (g_hash_table_iter_next(&iter, &key, &value))
+    {
+        gchar *nevra = (gchar *) key;
+        GArray *locations = (GArray *) value;
+        if (locations->len > 1) {
+            g_array_sort(locations, buildtimesort);
+            skipped_pkgs += handle_nevra_duplicates(locations, cmd_options->nevra_duplicates);
+            // re-sort to keep the warning-output easily readable for humans
+            g_array_sort(locations, strlensort);
+            duplicates_warning(nevra, locations, cmd_options->nevra_duplicates);
+        }
+    }
+
+    user_data.skipped_count = skipped_pkgs;
+
+    if (cmd_options->delayed_dump) {
+        // Finally dump the delayed (new) metadata!
+        package_count_in_headers = user_data.task_count - skipped_pkgs;
+        cr_xmlfile_set_num_of_pkgs(pri_cr_file, package_count_in_headers, NULL);
+        cr_xmlfile_set_num_of_pkgs(fil_cr_file, package_count_in_headers, NULL);
+        if (cmd_options->filelists_ext)
+            cr_xmlfile_set_num_of_pkgs(fex_cr_file, package_count_in_headers, NULL);
+        cr_xmlfile_set_num_of_pkgs(oth_cr_file, package_count_in_headers, NULL);
+        if (cmd_options->zck_compression) {
+            cr_xmlfile_set_num_of_pkgs(pri_cr_zck, package_count_in_headers, NULL);
+            cr_xmlfile_set_num_of_pkgs(fil_cr_zck, package_count_in_headers, NULL);
+            if (cmd_options->filelists_ext)
+                cr_xmlfile_set_num_of_pkgs(fex_cr_zck, package_count_in_headers, NULL);
+            cr_xmlfile_set_num_of_pkgs(oth_cr_zck, package_count_in_headers, NULL);
+        }
+        cr_delayed_dump_run(&user_data);
+    }
+
+    // Clean up nevra_table and everything it contains
+    g_hash_table_iter_init(&iter, user_data.nevra_table);
+    while (g_hash_table_iter_next(&iter, &key, &value))
+    {
+        g_free(key);
+        g_hash_table_iter_steal(&iter);
+        GArray *locations = (GArray *) value;
+        for (size_t i = 0; i < locations->len; i++) {
+            g_free(g_array_index(locations, struct DuplicateLocation, i).location);
+            cr_package_free(g_array_index(locations, struct DuplicateLocation, i).pkg);
+        }
+        g_array_free(locations, TRUE);
+    }
+    g_hash_table_destroy(user_data.nevra_table);
+
     // if there were any errors, exit nonzero
-    if ( cmd_options->error_exit_val && user_data.had_errors ) {
-	exit_val = 2;
+    if ( user_data.had_errors ) {
+	    exit_val = 2;
     }
 
     g_message("Pool finished%s", (user_data.had_errors ? " with errors" : ""));
@@ -1309,6 +1568,8 @@ main(int argc, char **argv)
     cr_xmlfile_close(pri_cr_file, &tmp_err);
     if (!tmp_err)
         cr_xmlfile_close(fil_cr_file, &tmp_err);
+    if (!tmp_err)
+        cr_xmlfile_close(fex_cr_file, &tmp_err);
     if (!tmp_err)
         cr_xmlfile_close(oth_cr_file, &tmp_err);
     if (tmp_err) {
@@ -1331,6 +1592,13 @@ main(int argc, char **argv)
         g_clear_error(&tmp_err);
         exit(EXIT_FAILURE);
     }
+    cr_xmlfile_close(fex_cr_zck, &tmp_err);
+    if (tmp_err) {
+        g_critical("%s: %s",
+                   fex_zck_filename, tmp_err->message);
+        g_clear_error(&tmp_err);
+        exit(EXIT_FAILURE);
+    }
     cr_xmlfile_close(oth_cr_zck, &tmp_err);
     if (tmp_err) {
         g_critical("%s: %s",
@@ -1346,7 +1614,7 @@ main(int argc, char **argv)
      * that unfortunately means we have to decompress metadata files change package
      * count value and compress them again.
      */
-    if (user_data.package_count != user_data.task_count){
+    if (package_count_in_headers != user_data.package_count) {
         g_message("Warning: There were some invalid packages: we have to recompress other, filelists and primary xml metadata files in order to have correct package counts");
 
         GThreadPool *rewrite_pkg_count_pool = g_thread_pool_new(cr_rewrite_pkg_count_thread,
@@ -1354,9 +1622,11 @@ main(int argc, char **argv)
 
         cr_CompressionTask *pri_rewrite_pkg_count_task     = NULL;
         cr_CompressionTask *fil_rewrite_pkg_count_task     = NULL;
+        cr_CompressionTask *fex_rewrite_pkg_count_task     = NULL;
         cr_CompressionTask *oth_rewrite_pkg_count_task     = NULL;
         cr_CompressionTask *pri_zck_rewrite_pkg_count_task = NULL;
         cr_CompressionTask *fil_zck_rewrite_pkg_count_task = NULL;
+        cr_CompressionTask *fex_zck_rewrite_pkg_count_task = NULL;
         cr_CompressionTask *oth_zck_rewrite_pkg_count_task = NULL;
 
         pri_rewrite_pkg_count_task = cr_compressiontask_new(pri_xml_filename,
@@ -1374,6 +1644,16 @@ main(int argc, char **argv)
                                                             NULL, FALSE, 1,
                                                             &tmp_err);
         g_thread_pool_push(rewrite_pkg_count_pool, fil_rewrite_pkg_count_task, NULL);
+
+        if (cmd_options->filelists_ext) {
+            fex_rewrite_pkg_count_task = cr_compressiontask_new(fex_xml_filename,
+                                                                NULL,
+                                                                xml_compression,
+                                                                cmd_options->repomd_checksum_type,
+                                                                NULL, FALSE, 1,
+                                                                &tmp_err);
+            g_thread_pool_push(rewrite_pkg_count_pool, fex_rewrite_pkg_count_task, NULL);
+        }
 
         oth_rewrite_pkg_count_task = cr_compressiontask_new(oth_xml_filename,
                                                             NULL,
@@ -1400,6 +1680,16 @@ main(int argc, char **argv)
                                                                 FALSE, 1, &tmp_err);
             g_thread_pool_push(rewrite_pkg_count_pool, fil_zck_rewrite_pkg_count_task, NULL);
 
+            if (cmd_options->filelists_ext) {
+                fex_zck_rewrite_pkg_count_task = cr_compressiontask_new(fex_zck_filename,
+                                                                    NULL,
+                                                                    CR_CW_ZCK_COMPRESSION,
+                                                                    cmd_options->repomd_checksum_type,
+                                                                    fex_dict_file,
+                                                                    FALSE, 1, &tmp_err);
+                g_thread_pool_push(rewrite_pkg_count_pool, fex_zck_rewrite_pkg_count_task, NULL);
+	    }
+
             oth_zck_rewrite_pkg_count_task = cr_compressiontask_new(oth_zck_filename,
                                                                 NULL,
                                                                 CR_CW_ZCK_COMPRESSION,
@@ -1413,19 +1703,25 @@ main(int argc, char **argv)
 
         error_check_and_set_content_stat(pri_rewrite_pkg_count_task, pri_xml_filename, &exit_val, &pri_stat);
         error_check_and_set_content_stat(fil_rewrite_pkg_count_task, fil_xml_filename, &exit_val, &fil_stat);
+        if (cmd_options->filelists_ext)
+            error_check_and_set_content_stat(fex_rewrite_pkg_count_task, fex_xml_filename, &exit_val, &fex_stat);
         error_check_and_set_content_stat(oth_rewrite_pkg_count_task, oth_xml_filename, &exit_val, &oth_stat);
 
         cr_compressiontask_free(pri_rewrite_pkg_count_task, NULL);
         cr_compressiontask_free(fil_rewrite_pkg_count_task, NULL);
+        cr_compressiontask_free(fex_rewrite_pkg_count_task, NULL);
         cr_compressiontask_free(oth_rewrite_pkg_count_task, NULL);
 
         if (cmd_options->zck_compression){
             error_check_and_set_content_stat(pri_zck_rewrite_pkg_count_task, pri_zck_filename, &exit_val, &pri_zck_stat);
             error_check_and_set_content_stat(fil_zck_rewrite_pkg_count_task, fil_zck_filename, &exit_val, &fil_zck_stat);
+            if (cmd_options->filelists_ext)
+                error_check_and_set_content_stat(fex_zck_rewrite_pkg_count_task, fex_zck_filename, &exit_val, &fex_zck_stat);
             error_check_and_set_content_stat(oth_zck_rewrite_pkg_count_task, oth_zck_filename, &exit_val, &oth_zck_stat);
 
             cr_compressiontask_free(pri_zck_rewrite_pkg_count_task, NULL);
             cr_compressiontask_free(fil_zck_rewrite_pkg_count_task, NULL);
+            cr_compressiontask_free(fex_zck_rewrite_pkg_count_task, NULL);
             cr_compressiontask_free(oth_zck_rewrite_pkg_count_task, NULL);
         }
 
@@ -1433,16 +1729,20 @@ main(int argc, char **argv)
     if (cmd_options->zck_compression){
         g_free(pri_dict_file);
         g_free(fil_dict_file);
+        g_free(fex_dict_file);
         g_free(oth_dict_file);
     }
 
     g_queue_free(user_data.buffer);
+    g_mutex_clear(&(user_data.mutex_nevra_table));
     g_mutex_clear(&(user_data.mutex_output_pkg_list));
     g_mutex_clear(&(user_data.mutex_pri));
     g_mutex_clear(&(user_data.mutex_fil));
+    g_mutex_clear(&(user_data.mutex_fex));
     g_mutex_clear(&(user_data.mutex_oth));
     g_cond_clear(&(user_data.cond_pri));
     g_cond_clear(&(user_data.cond_fil));
+    g_cond_clear(&(user_data.cond_fex));
     g_cond_clear(&(user_data.cond_oth));
     g_mutex_clear(&(user_data.mutex_buffer));
     g_mutex_clear(&(user_data.mutex_old_md));
@@ -1455,34 +1755,43 @@ main(int argc, char **argv)
 
     cr_RepomdRecord *pri_xml_rec = cr_repomd_record_new("primary", pri_xml_filename);
     cr_RepomdRecord *fil_xml_rec = cr_repomd_record_new("filelists", fil_xml_filename);
+    cr_RepomdRecord *fex_xml_rec              = NULL;
+    if (cmd_options->filelists_ext)
+        fex_xml_rec = cr_repomd_record_new("filelists-ext", fex_xml_filename);
     cr_RepomdRecord *oth_xml_rec = cr_repomd_record_new("other", oth_xml_filename);
     cr_RepomdRecord *pri_db_rec               = NULL;
     cr_RepomdRecord *fil_db_rec               = NULL;
+    cr_RepomdRecord *fex_db_rec               = NULL;
     cr_RepomdRecord *oth_db_rec               = NULL;
     cr_RepomdRecord *pri_zck_rec              = NULL;
     cr_RepomdRecord *fil_zck_rec              = NULL;
+    cr_RepomdRecord *fex_zck_rec              = NULL;
     cr_RepomdRecord *oth_zck_rec              = NULL;
     cr_RepomdRecord *prestodelta_rec          = NULL;
     cr_RepomdRecord *prestodelta_zck_rec      = NULL;
 
     // List of cr_RepomdRecords
-    GSList *additional_metadata_rec           = NULL; 
+    GSList *additional_metadata_rec           = NULL;
 
     // XML
     cr_repomd_record_load_contentstat(pri_xml_rec, pri_stat);
     cr_repomd_record_load_contentstat(fil_xml_rec, fil_stat);
+    if (cmd_options->filelists_ext)
+        cr_repomd_record_load_contentstat(fex_xml_rec, fex_stat);
     cr_repomd_record_load_contentstat(oth_xml_rec, oth_stat);
 
     cr_contentstat_free(pri_stat, NULL);
     cr_contentstat_free(fil_stat, NULL);
+    cr_contentstat_free(fex_stat, NULL);
     cr_contentstat_free(oth_stat, NULL);
 
     GThreadPool *fill_pool = g_thread_pool_new(cr_repomd_record_fill_thread,
                                                NULL, 3, FALSE, NULL);
 
-    cr_RepomdRecordFillTask *pri_fill_task;
-    cr_RepomdRecordFillTask *fil_fill_task;
-    cr_RepomdRecordFillTask *oth_fill_task;
+    cr_RepomdRecordFillTask *pri_fill_task = NULL;
+    cr_RepomdRecordFillTask *fil_fill_task = NULL;
+    cr_RepomdRecordFillTask *fex_fill_task = NULL;
+    cr_RepomdRecordFillTask *oth_fill_task = NULL;
 
     pri_fill_task = cr_repomdrecordfilltask_new(pri_xml_rec,
                                                 cmd_options->repomd_checksum_type,
@@ -1494,6 +1803,13 @@ main(int argc, char **argv)
                                                 NULL);
     g_thread_pool_push(fill_pool, fil_fill_task, NULL);
 
+    if (cmd_options->filelists_ext) {
+        fex_fill_task = cr_repomdrecordfilltask_new(fex_xml_rec,
+                                                    cmd_options->repomd_checksum_type,
+                                                    NULL);
+        g_thread_pool_push(fill_pool, fex_fill_task, NULL);
+    }
+
     oth_fill_task = cr_repomdrecordfilltask_new(oth_xml_rec,
                                                 cmd_options->repomd_checksum_type,
                                                 NULL);
@@ -1503,40 +1819,33 @@ main(int argc, char **argv)
     additional_metadata_rec = cr_create_repomd_records_for_additional_metadata(additional_metadata,
                                                                                cmd_options->repomd_checksum_type);
 
-    if (new_groupfile_metadatum) {
-        additional_metadata_rec = cr_create_repomd_records_for_groupfile_metadata(new_groupfile_metadatum,
-                                                                                  additional_metadata_rec,
-                                                                                  compression,
-                                                                                  cmd_options->repomd_checksum_type);
-
-        //NOTE(amatej): Now we can add groupfile metadata to the additional_metadata list, for unified handlig while zck compressing
-        additional_metadata = g_slist_prepend(additional_metadata, new_groupfile_metadatum);
-        cr_Metadatum *compressed_new_groupfile_metadatum = g_malloc0(sizeof(cr_Metadatum));
-        compressed_new_groupfile_metadatum->name = g_strdup(((cr_RepomdRecord *) additional_metadata_rec->data)->location_real);
-        compressed_new_groupfile_metadatum->type = g_strdup(((cr_RepomdRecord *) additional_metadata_rec->data)->type);
-        additional_metadata = g_slist_prepend(additional_metadata, compressed_new_groupfile_metadatum);
-    }
-
     // Wait till repomd record fill task of xml files ends.
     g_thread_pool_free(fill_pool, FALSE, TRUE);
 
     cr_repomdrecordfilltask_free(pri_fill_task, NULL);
     cr_repomdrecordfilltask_free(fil_fill_task, NULL);
+    cr_repomdrecordfilltask_free(fex_fill_task, NULL);
     cr_repomdrecordfilltask_free(oth_fill_task, NULL);
 
     // Sqlite db
-    if (!cmd_options->no_database) {
+    if (cmd_options->database) {
 
         gchar *pri_db_name = g_strconcat(tmp_out_repo, "/primary.sqlite",
                                          sqlite_compression_suffix, NULL);
         gchar *fil_db_name = g_strconcat(tmp_out_repo, "/filelists.sqlite",
                                          sqlite_compression_suffix, NULL);
+        gchar *fex_db_name = NULL;
+        if (cmd_options->filelists_ext)
+            fex_db_name = g_strconcat(tmp_out_repo, "/filelists-ext.sqlite",
+                                      sqlite_compression_suffix, NULL);
         gchar *oth_db_name = g_strconcat(tmp_out_repo, "/other.sqlite",
                                          sqlite_compression_suffix, NULL);
 
         cr_db_dbinfo_update(pri_db, pri_xml_rec->checksum, &tmp_err);
         if (!tmp_err)
             cr_db_dbinfo_update(fil_db, fil_xml_rec->checksum, &tmp_err);
+        if (!tmp_err && cmd_options->filelists_ext)
+            cr_db_dbinfo_update(fex_db, fex_xml_rec->checksum, &tmp_err);
         if (!tmp_err)
             cr_db_dbinfo_update(oth_db, oth_xml_rec->checksum, &tmp_err);
         if (tmp_err) {
@@ -1548,6 +1857,8 @@ main(int argc, char **argv)
         cr_db_close(pri_db, &tmp_err);
         if (!tmp_err)
             cr_db_close(fil_db, &tmp_err);
+        if (!tmp_err)
+            cr_db_close(fex_db, &tmp_err);
         if (!tmp_err)
             cr_db_close(oth_db, &tmp_err);
         if (tmp_err) {
@@ -1561,9 +1872,10 @@ main(int argc, char **argv)
         GThreadPool *compress_pool =  g_thread_pool_new(cr_compressing_thread,
                                                         NULL, 3, FALSE, NULL);
 
-        cr_CompressionTask *pri_db_task;
-        cr_CompressionTask *fil_db_task;
-        cr_CompressionTask *oth_db_task;
+        cr_CompressionTask *pri_db_task = NULL;
+        cr_CompressionTask *fil_db_task = NULL;
+        cr_CompressionTask *fex_db_task = NULL;
+        cr_CompressionTask *oth_db_task = NULL;
 
         pri_db_task = cr_compressiontask_new(pri_db_filename,
                                              pri_db_name,
@@ -1579,6 +1891,15 @@ main(int argc, char **argv)
                                              NULL, FALSE, 1, NULL);
         g_thread_pool_push(compress_pool, fil_db_task, NULL);
 
+        if (cmd_options->filelists_ext) {
+            fex_db_task = cr_compressiontask_new(fex_db_filename,
+                                                 fex_db_name,
+                                                 sqlite_compression,
+                                                 cmd_options->repomd_checksum_type,
+                                                 NULL, FALSE, 1, NULL);
+            g_thread_pool_push(compress_pool, fex_db_task, NULL);
+        }
+
         oth_db_task = cr_compressiontask_new(oth_db_filename,
                                              oth_db_name,
                                              sqlite_compression,
@@ -1591,32 +1912,48 @@ main(int argc, char **argv)
         if (!cmd_options->local_sqlite) {
             cr_rm(pri_db_filename, CR_RM_FORCE, NULL, NULL);
             cr_rm(fil_db_filename, CR_RM_FORCE, NULL, NULL);
+            if (cmd_options->filelists_ext)
+                cr_rm(fex_db_filename, CR_RM_FORCE, NULL, NULL);
             cr_rm(oth_db_filename, CR_RM_FORCE, NULL, NULL);
         }
 
         // Prepare repomd records
         pri_db_rec = cr_repomd_record_new("primary_db", pri_db_name);
         fil_db_rec = cr_repomd_record_new("filelists_db", fil_db_name);
+        if (cmd_options->filelists_ext)
+            fex_db_rec = cr_repomd_record_new("filelists-ext_db", fex_db_name);
         oth_db_rec = cr_repomd_record_new("other_db", oth_db_name);
+
+        // Set db version
+        pri_db_rec->db_ver = DEFAULT_DATABASE_VERSION;
+        fil_db_rec->db_ver = DEFAULT_DATABASE_VERSION;
+        if (cmd_options->filelists_ext)
+            fex_db_rec->db_ver = DEFAULT_DATABASE_VERSION;
+        oth_db_rec->db_ver = DEFAULT_DATABASE_VERSION;
 
         g_free(pri_db_name);
         g_free(fil_db_name);
+        g_free(fex_db_name);
         g_free(oth_db_name);
 
         cr_repomd_record_load_contentstat(pri_db_rec, pri_db_task->stat);
         cr_repomd_record_load_contentstat(fil_db_rec, fil_db_task->stat);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_load_contentstat(fex_db_rec, fex_db_task->stat);
         cr_repomd_record_load_contentstat(oth_db_rec, oth_db_task->stat);
 
         cr_compressiontask_free(pri_db_task, NULL);
         cr_compressiontask_free(fil_db_task, NULL);
+        cr_compressiontask_free(fex_db_task, NULL);
         cr_compressiontask_free(oth_db_task, NULL);
 
         fill_pool = g_thread_pool_new(cr_repomd_record_fill_thread,
                                       NULL, 3, FALSE, NULL);
 
-        cr_RepomdRecordFillTask *pri_db_fill_task;
-        cr_RepomdRecordFillTask *fil_db_fill_task;
-        cr_RepomdRecordFillTask *oth_db_fill_task;
+        cr_RepomdRecordFillTask *pri_db_fill_task = NULL;
+        cr_RepomdRecordFillTask *fil_db_fill_task = NULL;
+        cr_RepomdRecordFillTask *fex_db_fill_task = NULL;
+        cr_RepomdRecordFillTask *oth_db_fill_task = NULL;
 
         pri_db_fill_task = cr_repomdrecordfilltask_new(pri_db_rec,
                                                        cmd_options->repomd_checksum_type,
@@ -1628,6 +1965,13 @@ main(int argc, char **argv)
                                                        NULL);
         g_thread_pool_push(fill_pool, fil_db_fill_task, NULL);
 
+        if (cmd_options->filelists_ext) {
+            fex_db_fill_task = cr_repomdrecordfilltask_new(fex_db_rec,
+                                                           cmd_options->repomd_checksum_type,
+                                                           NULL);
+            g_thread_pool_push(fill_pool, fex_db_fill_task, NULL);
+        }
+
         oth_db_fill_task = cr_repomdrecordfilltask_new(oth_db_rec,
                                                        cmd_options->repomd_checksum_type,
                                                        NULL);
@@ -1637,6 +1981,7 @@ main(int argc, char **argv)
 
         cr_repomdrecordfilltask_free(pri_db_fill_task, NULL);
         cr_repomdrecordfilltask_free(fil_db_fill_task, NULL);
+        cr_repomdrecordfilltask_free(fex_db_fill_task, NULL);
         cr_repomdrecordfilltask_free(oth_db_fill_task, NULL);
     }
 
@@ -1645,18 +1990,23 @@ main(int argc, char **argv)
         // Prepare repomd records
         pri_zck_rec = cr_repomd_record_new("primary_zck", pri_zck_filename);
         fil_zck_rec = cr_repomd_record_new("filelists_zck", fil_zck_filename);
+        if (cmd_options->filelists_ext)
+            fex_zck_rec = cr_repomd_record_new("filelists-ext_zck", fex_zck_filename);
         oth_zck_rec = cr_repomd_record_new("other_zck", oth_zck_filename);
 
         cr_repomd_record_load_zck_contentstat(pri_zck_rec, pri_zck_stat);
         cr_repomd_record_load_zck_contentstat(fil_zck_rec, fil_zck_stat);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_load_zck_contentstat(fex_zck_rec, fex_zck_stat);
         cr_repomd_record_load_zck_contentstat(oth_zck_rec, oth_zck_stat);
 
         fill_pool = g_thread_pool_new(cr_repomd_record_fill_thread,
                                       NULL, 3, FALSE, NULL);
 
-        cr_RepomdRecordFillTask *pri_zck_fill_task;
-        cr_RepomdRecordFillTask *fil_zck_fill_task;
-        cr_RepomdRecordFillTask *oth_zck_fill_task;
+        cr_RepomdRecordFillTask *pri_zck_fill_task = NULL;
+        cr_RepomdRecordFillTask *fil_zck_fill_task = NULL;
+        cr_RepomdRecordFillTask *fex_zck_fill_task = NULL;
+        cr_RepomdRecordFillTask *oth_zck_fill_task = NULL;
 
         pri_zck_fill_task = cr_repomdrecordfilltask_new(pri_zck_rec,
                                                        cmd_options->repomd_checksum_type,
@@ -1668,6 +2018,13 @@ main(int argc, char **argv)
                                                        NULL);
         g_thread_pool_push(fill_pool, fil_zck_fill_task, NULL);
 
+        if (cmd_options->filelists_ext) {
+            fex_zck_fill_task = cr_repomdrecordfilltask_new(fex_zck_rec,
+                                                           cmd_options->repomd_checksum_type,
+                                                           NULL);
+            g_thread_pool_push(fill_pool, fex_zck_fill_task, NULL);
+        }
+
         oth_zck_fill_task = cr_repomdrecordfilltask_new(oth_zck_rec,
                                                        cmd_options->repomd_checksum_type,
                                                        NULL);
@@ -1677,6 +2034,7 @@ main(int argc, char **argv)
 
         cr_repomdrecordfilltask_free(pri_zck_fill_task, NULL);
         cr_repomdrecordfilltask_free(fil_zck_fill_task, NULL);
+        cr_repomdrecordfilltask_free(fex_zck_fill_task, NULL);
         cr_repomdrecordfilltask_free(oth_zck_fill_task, NULL);
 
         //ZCK for additional metadata
@@ -1712,9 +2070,9 @@ main(int argc, char **argv)
                 g_clear_error(&tmp_err);
                 exit(EXIT_FAILURE);
             }
-            /* Only create additional_metadata_zck if additional_metadata isn't already zchunk 
+            /* Only create additional_metadata_zck if additional_metadata isn't already zchunk
              * and its zck version doesn't yet exists */
-            if (com_type != CR_CW_ZCK_COMPRESSION && 
+            if (com_type != CR_CW_ZCK_COMPRESSION &&
                 !g_slist_find_custom(additional_metadata_rec, additional_metadatum_rec_zck_type, cr_cmp_repomd_record_type)) {
                 GSList *additional_metadatum_rec_elem = g_slist_find_custom(additional_metadata_rec,
                                                                             ((cr_Metadatum *) element->data)->type,
@@ -1748,6 +2106,7 @@ main(int argc, char **argv)
 
     cr_contentstat_free(pri_zck_stat, NULL);
     cr_contentstat_free(fil_zck_stat, NULL);
+    cr_contentstat_free(fex_zck_stat, NULL);
     cr_contentstat_free(oth_zck_stat, NULL);
 
 #ifdef CR_DELTA_RPM_SUPPORT
@@ -1891,12 +2250,18 @@ deltaerror:
     if (cmd_options->unique_md_filenames) {
         cr_repomd_record_rename_file(pri_xml_rec, NULL);
         cr_repomd_record_rename_file(fil_xml_rec, NULL);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_rename_file(fex_xml_rec, NULL);
         cr_repomd_record_rename_file(oth_xml_rec, NULL);
         cr_repomd_record_rename_file(pri_db_rec, NULL);
         cr_repomd_record_rename_file(fil_db_rec, NULL);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_rename_file(fex_db_rec, NULL);
         cr_repomd_record_rename_file(oth_db_rec, NULL);
         cr_repomd_record_rename_file(pri_zck_rec, NULL);
         cr_repomd_record_rename_file(fil_zck_rec, NULL);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_rename_file(fex_zck_rec, NULL);
         cr_repomd_record_rename_file(oth_zck_rec, NULL);
         cr_repomd_record_rename_file(prestodelta_rec, NULL);
         cr_repomd_record_rename_file(prestodelta_zck_rec, NULL);
@@ -1911,9 +2276,13 @@ deltaerror:
         gint64 revision = strtoll(cmd_options->revision, NULL, 0);
         cr_repomd_record_set_timestamp(pri_xml_rec, revision);
         cr_repomd_record_set_timestamp(fil_xml_rec, revision);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_set_timestamp(fex_xml_rec, revision);
         cr_repomd_record_set_timestamp(oth_xml_rec, revision);
         cr_repomd_record_set_timestamp(pri_db_rec, revision);
         cr_repomd_record_set_timestamp(fil_db_rec, revision);
+        if (cmd_options->filelists_ext)
+            cr_repomd_record_set_timestamp(fex_db_rec, revision);
         cr_repomd_record_set_timestamp(oth_db_rec, revision);
         cr_repomd_record_set_timestamp(prestodelta_rec, revision);
         GSList *element = additional_metadata_rec;
@@ -1925,12 +2294,18 @@ deltaerror:
     // Gen xml
     cr_repomd_set_record(repomd_obj, pri_xml_rec);
     cr_repomd_set_record(repomd_obj, fil_xml_rec);
+    if (cmd_options->filelists_ext)
+        cr_repomd_set_record(repomd_obj, fex_xml_rec);
     cr_repomd_set_record(repomd_obj, oth_xml_rec);
     cr_repomd_set_record(repomd_obj, pri_db_rec);
     cr_repomd_set_record(repomd_obj, fil_db_rec);
+    if (cmd_options->filelists_ext)
+        cr_repomd_set_record(repomd_obj, fex_db_rec);
     cr_repomd_set_record(repomd_obj, oth_db_rec);
     cr_repomd_set_record(repomd_obj, pri_zck_rec);
     cr_repomd_set_record(repomd_obj, fil_zck_rec);
+    if (cmd_options->filelists_ext)
+        cr_repomd_set_record(repomd_obj, fex_zck_rec);
     cr_repomd_set_record(repomd_obj, oth_zck_rec);
     cr_repomd_set_record(repomd_obj, prestodelta_rec);
     cr_repomd_set_record(repomd_obj, prestodelta_zck_rec);
@@ -1962,9 +2337,24 @@ deltaerror:
 
     cr_repomd_sort_records(repomd_obj);
 
+
+    // Compare old repomd with the new one to see if we actually need to update the repodata.
+    // If some retain options are specified always update the repo.
+    if (old_metadata_location && cr_repomd_compare(repomd_obj, old_metadata_location->repomd_data) &&
+        !cmd_options->retain_old && !cmd_options->retain_old_md_by_age) {
+        g_message("New and old repodata match, not updating.");
+        if (cr_rm(tmp_out_repo, CR_RM_RECURSIVE, NULL, &tmp_err)) {
+            g_debug("tmp_out_repo %s removed", tmp_out_repo);
+        } else {
+            g_warning("Cannot remove %s: %s", tmp_out_repo, tmp_err->message);
+            g_clear_error(&tmp_err);
+        }
+
+        goto cleanup;
+    }
+
     char *repomd_xml = cr_xml_dump_repomd(repomd_obj, &tmp_err);
     assert(repomd_xml || tmp_err);
-    cr_repomd_free(repomd_obj);
 
     if (!repomd_xml) {
         g_critical("Cannot generate repomd.xml: %s", tmp_err->message);
@@ -2029,30 +2419,22 @@ deltaerror:
     gchar *old_repodata_path = g_build_filename(out_dir, tmp_dirname, NULL);
     g_free(tmp_dirname);
 
-    if (g_rename(out_repo, old_repodata_path) == -1) {
-        g_debug("Old repodata doesn't exists: Cannot rename %s -> %s: %s",
-                out_repo, old_repodata_path, g_strerror(errno));
+    if (!cr_move_recursive(out_repo, old_repodata_path, &tmp_err)) {
+        g_debug("Old repodata doesn't exist: Cannot rename %s -> %s: %s",
+                out_repo, old_repodata_path, tmp_err->message);
     } else {
         g_debug("Renamed %s -> %s", out_repo, old_repodata_path);
         old_repodata_renamed = TRUE;
     }
 
     // Rename tmp_out_repo to out_repo
-    if (g_rename(tmp_out_repo, out_repo) == -1) {
+    if (!cr_move_recursive(tmp_out_repo, out_repo, &tmp_err)) {
         g_critical("Cannot rename %s -> %s: %s", tmp_out_repo, out_repo,
-                   g_strerror(errno));
+                   tmp_err->message);
         exit(EXIT_FAILURE);
     } else {
         g_debug("Renamed %s -> %s", tmp_out_repo, out_repo);
     }
-
-    // Remove lock
-    if (g_strcmp0(lock_dir, tmp_out_repo))
-        // If lock_dir is not same as temporary repo dir then remove it
-        cr_remove_dir(lock_dir, NULL);
-
-    // Disable path stored for exit handler
-    cr_unset_cleanup_handler(NULL);
 
     sigprocmask(SIG_SETMASK, &old_mask, NULL);
 
@@ -2069,15 +2451,29 @@ deltaerror:
     }
 
 
+    g_free(old_repodata_path);
+
+cleanup:
     // Clean up
     g_debug("Memory cleanup");
+
+    cr_repomd_free(repomd_obj);
+
+    // Remove lock
+    if (g_strcmp0(lock_dir, tmp_out_repo))
+        // If lock_dir is not same as temporary repo dir then remove it
+        cr_remove_dir(lock_dir, NULL);
+
+    // Disable path stored for exit handler
+    cr_unset_cleanup_handler(NULL);
+
+    cr_metadatalocation_free(old_metadata_location);
 
     if (old_metadata)
         cr_metadata_free(old_metadata);
 
     g_free(user_data.prev_srpm);
     g_free(user_data.cur_srpm);
-    g_free(old_repodata_path);
     g_free(in_repo);
     g_free(out_repo);
     g_free(tmp_out_repo);
@@ -2086,12 +2482,15 @@ deltaerror:
     g_free(lock_dir);
     g_free(pri_xml_filename);
     g_free(fil_xml_filename);
+    g_free(fex_xml_filename);
     g_free(oth_xml_filename);
     g_free(pri_db_filename);
     g_free(fil_db_filename);
+    g_free(fex_db_filename);
     g_free(oth_db_filename);
     g_free(pri_zck_filename);
     g_free(fil_zck_filename);
+    g_free(fex_zck_filename);
     g_free(oth_zck_filename);
     g_slist_free_full(additional_metadata, (GDestroyNotify) cr_metadatum_free);
     g_slist_free(additional_metadata_rec);

@@ -22,6 +22,7 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#include <locale.h>
 #include "cmd_parser.h"
 #include "deltarpms.h"
 #include "error.h"
@@ -65,8 +66,29 @@ struct CmdOptions _cmd_options = {
         .zck_compression            = FALSE,
         .zck_dict_dir               = NULL,
         .recycle_pkglist            = FALSE,
+
+        .keep_all_metadata          = TRUE,
+        .nevra_duplicates           = CR_ARG_DUP_NEVRA_KEEP_ALL,
     };
 
+
+gboolean
+duplicated_nevra_option_parser(const gchar *option_name,
+                               const gchar *value,
+                               gpointer data,
+                               GError **error)
+{
+    if (!g_strcmp0(value, "keep"))
+        _cmd_options.nevra_duplicates = CR_ARG_DUP_NEVRA_KEEP_ALL;
+    else if (!g_strcmp0(value, "keep-last"))
+        _cmd_options.nevra_duplicates = CR_ARG_DUP_NEVRA_KEEP_LAST;
+    else {
+        g_set_error(error, ERR_DOMAIN, CRE_BADARG,
+                    "Bad --duplicated-nevra argument, use 'keep' or 'keep-last'.");
+        return FALSE;
+    }
+    return TRUE;
+}
 
 
 // Command line params
@@ -96,7 +118,9 @@ static GOptionEntry cmd_entries[] =
     { "database", 'd', 0, G_OPTION_ARG_NONE, &(_cmd_options.database),
       "Generate sqlite databases for use with yum.", NULL },
     { "no-database", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.no_database),
-      "Do not generate sqlite databases in the repository.", NULL },
+      "Do not generate sqlite databases in the repository (default).", NULL },
+    { "filelists-ext", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.filelists_ext),
+      "Create filelists-ext metadata with file hashes.", NULL },
     { "update", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.update),
       "If metadata already exists in the outputdir and an rpm is unchanged "
       "(based on file size and mtime) since the metadata was generated, reuse "
@@ -156,9 +180,9 @@ static GOptionEntry cmd_entries[] =
     { "xz", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.xz_compression),
       "Use xz for repodata compression.", NULL },
     { "compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.compress_type),
-      "Which compression type to use.", "COMPRESSION_TYPE" },
+      "Which compression type to use for additional metadata files (comps, updateinfo, etc). Supported compressions are: bzip2, gzip, zck, zstd, xz.", "COMPRESSION_TYPE" },
     { "general-compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.general_compress_type),
-      "Which compression type to use (even for primary, filelists and other xml).",
+      "Which compression type to use (even for primary, filelists and other xml). Supported compressions are: bzip2, gzip, zck, zstd, xz.",
       "COMPRESSION_TYPE" },
 #ifdef WITH_ZCHUNK
     { "zck", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.zck_compression),
@@ -168,6 +192,9 @@ static GOptionEntry cmd_entries[] =
 #endif
     { "keep-all-metadata", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.keep_all_metadata),
       "Keep all additional metadata (not primary, filelists and other xml or sqlite files, "
+      "nor their compressed variants) from source repository during update (default).", NULL },
+    { "discard-additional-metadata", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.discard_additional_metadata),
+      "Discard all additional metadata (not primary, filelists and other xml or sqlite files, "
       "nor their compressed variants) from source repository during update.", NULL },
     { "compatibility", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.compatibility),
       "Enforce maximal compatibility with classical createrepo (Affects only: --retain-old-md).", NULL },
@@ -203,11 +230,13 @@ static GOptionEntry cmd_entries[] =
     { "repomd-checksum", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.repomd_checksum),
       "Checksum type to be used in repomd.xml", "CHECKSUM_TYPE"},
     { "error-exit-val", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.error_exit_val),
-      "Exit with retval 2 if there were any errors during processing", NULL },
+      "Exit with retval 2 if there were any errors during processing (option deprecated, on by default)", NULL },
     { "recycle-pkglist", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.recycle_pkglist),
       "Read the list of packages from old metadata directory and re-use it.  This "
       "option is only useful with --update (complements --pkglist and friends).",
       NULL },
+    { "duplicated-nevra", 0, 0, G_OPTION_ARG_CALLBACK, duplicated_nevra_option_parser,
+      "What to do about duplicates.", NULL, },
     { NULL, 0, 0, G_OPTION_ARG_NONE, NULL, NULL, NULL },
 };
 
@@ -249,6 +278,13 @@ struct CmdOptions *parse_arguments(int *argc, char ***argv, GError **err)
     g_option_group_add_entries(group_expert, expert_entries);
     g_option_context_add_group(context, group_expert);
 
+    /*
+      setlocale is required to ensure that NON-ASCII chars can be parsed
+      SEE https://developer-old.gnome.org/glib/unstable/glib-running.html#setlocale
+      for further information
+    */
+    setlocale(LC_ALL, "");
+
     ret = g_option_context_parse(context, argc, argv, err);
     g_option_context_free(context);
 
@@ -279,6 +315,8 @@ check_and_set_compression_type(const char *type_str,
         *type = CR_CW_BZ2_COMPRESSION;
     } else if (!strcmp(compress_str->str, "xz")) {
         *type = CR_CW_XZ_COMPRESSION;
+    } else if (!strcmp(compress_str->str, "zstd")) {
+        *type = CR_CW_ZSTD_COMPRESSION;
     } else {
         g_set_error(err, ERR_DOMAIN, CRE_BADARG,
                     "Unknown/Unsupported compression type \"%s\"", type_str);
@@ -350,7 +388,7 @@ check_arguments(struct CmdOptions *options,
     // Check outputdir
     if (options->outputdir && !g_file_test(options->outputdir, G_FILE_TEST_EXISTS|G_FILE_TEST_IS_DIR)) {
         g_set_error(err, ERR_DOMAIN, CRE_BADARG,
-                    "Specified outputdir \"%s\" doesn't exists",
+                    "Specified outputdir \"%s\" doesn't exist",
                     options->outputdir);
         return FALSE;
     }
@@ -462,7 +500,7 @@ check_arguments(struct CmdOptions *options,
 
         if (!remote && !g_file_test(options->groupfile_fullpath, G_FILE_TEST_IS_REGULAR)) {
             g_set_error(err, ERR_DOMAIN, CRE_BADARG,
-                        "groupfile %s doesn't exists",
+                        "groupfile %s doesn't exist",
                         options->groupfile_fullpath);
             return FALSE;
         }
@@ -472,7 +510,7 @@ check_arguments(struct CmdOptions *options,
     if (options->pkglist) {
         if (!g_file_test(options->pkglist, G_FILE_TEST_IS_REGULAR)) {
             g_set_error(err, ERR_DOMAIN, CRE_BADARG,
-                        "pkglist file \"%s\" doesn't exists", options->pkglist);
+                        "pkglist file \"%s\" doesn't exist", options->pkglist);
             return FALSE;
         } else {
             char *content = NULL;
@@ -510,9 +548,13 @@ check_arguments(struct CmdOptions *options,
         x++;
     }
 
-    // Check keep-all-metadata
-    if (options->keep_all_metadata && !options->update) {
-        g_warning("--keep-all-metadata has no effect (--update is not used)");
+    if (options->discard_additional_metadata) {
+        options->keep_all_metadata = FALSE;
+    }
+
+    // Check discard-additional-metadata
+    if (options->discard_additional_metadata && !options->update) {
+        g_warning("--discard-additional-metadata has no effect (--update is not used)");
     }
 
     // Process --distro tags

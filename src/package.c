@@ -19,6 +19,7 @@
  */
 
 #include <string.h>
+#include "package_internal.h"
 #include "package.h"
 #include "misc.h"
 
@@ -85,11 +86,6 @@ cr_package_free(cr_Package *package)
 
     if (package->chunk && !(package->loadingflags & CR_PACKAGE_SINGLE_CHUNK))
         g_string_chunk_free (package->chunk);
-
-/* Note: Since glib 2.28
- * g_slist_foreach && g_slist_free could be replaced with one function:
- * g_slist_free_full()
- */
 
     if (package->requires) {
         g_slist_free_full(package->requires, g_free);
@@ -181,7 +177,13 @@ cr_Package *
 cr_package_copy(cr_Package *orig)
 {
     cr_Package *pkg = cr_package_new();
+    cr_package_copy_into(orig, pkg);
+    return pkg;
+}
 
+void
+cr_package_copy_into(cr_Package *orig, cr_Package *pkg)
+{
     pkg->pkgKey           = orig->pkgKey;
     pkg->pkgId            = cr_safe_string_chunk_insert(pkg->chunk, orig->pkgId);
     pkg->name             = cr_safe_string_chunk_insert(pkg->chunk, orig->name);
@@ -208,6 +210,7 @@ cr_package_copy(cr_Package *orig)
     pkg->location_href    = cr_safe_string_chunk_insert(pkg->chunk, orig->location_href);
     pkg->location_base    = cr_safe_string_chunk_insert(pkg->chunk, orig->location_base);
     pkg->checksum_type    = cr_safe_string_chunk_insert(pkg->chunk, orig->checksum_type);
+    pkg->files_checksum_type = cr_safe_string_chunk_insert(pkg->chunk, orig->files_checksum_type);
 
     pkg->requires    = cr_dependency_dup(pkg->chunk, orig->requires);
     pkg->provides    = cr_dependency_dup(pkg->chunk, orig->provides);
@@ -221,9 +224,10 @@ cr_package_copy(cr_Package *orig)
     for (GSList *elem = orig->files; elem; elem = g_slist_next(elem)) {
         cr_PackageFile *orig_file = elem->data;
         cr_PackageFile *file = cr_package_file_new();
-        file->type = cr_safe_string_chunk_insert(pkg->chunk, orig_file->type);
-        file->path = cr_safe_string_chunk_insert(pkg->chunk, orig_file->path);
-        file->name = cr_safe_string_chunk_insert(pkg->chunk, orig_file->name);
+        file->type   = cr_safe_string_chunk_insert(pkg->chunk, orig_file->type);
+        file->path   = cr_safe_string_chunk_insert(pkg->chunk, orig_file->path);
+        file->name   = cr_safe_string_chunk_insert(pkg->chunk, orig_file->name);
+        file->digest = cr_safe_string_chunk_insert(pkg->chunk, orig_file->digest);
         pkg->files = g_slist_prepend(pkg->files, file);
     }
 
@@ -235,6 +239,4 @@ cr_package_copy(cr_Package *orig)
         log->changelog = cr_safe_string_chunk_insert(pkg->chunk, orig_log->changelog);
         pkg->changelogs = g_slist_prepend(pkg->changelogs, log);
     }
-
-    return pkg;
 }

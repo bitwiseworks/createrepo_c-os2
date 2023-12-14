@@ -42,6 +42,16 @@ PyDoc_STRVAR(xml_parse_filelists_snippet__doc__,
 PyObject *py_xml_parse_filelists(PyObject *self, PyObject *args);
 PyObject *py_xml_parse_filelists_snippet(PyObject *self, PyObject *args);
 
+PyDoc_STRVAR(xml_parse_filelists_ext__doc__,
+"xml_parse_filelists_ext(filename, newpkgcb, pkgcb, warningcb) -> None\n\n"
+"Parse filelists-ext.xml");
+PyDoc_STRVAR(xml_parse_filelists_ext_snippet__doc__,
+"xml_parse_filelists_ext_snippet(snippet, newpkgcb, pkgcb, warningcb) -> None\n\n"
+"Parse filelists-ext xml snippet");
+
+PyObject *py_xml_parse_filelists_ext(PyObject *self, PyObject *args);
+PyObject *py_xml_parse_filelists_ext_snippet(PyObject *self, PyObject *args);
+
 PyDoc_STRVAR(xml_parse_other__doc__,
 "xml_parse_other(filename, newpkgcb, pkgcb, warningcb) -> None\n\n"
 "Parse other.xml");
@@ -63,5 +73,12 @@ PyDoc_STRVAR(xml_parse_updateinfo__doc__,
 "Parse updateinfo.xml");
 
 PyObject *py_xml_parse_updateinfo(PyObject *self, PyObject *args);
+
+extern PyTypeObject PkgIterator_Type;
+
+#define PkgIteratorObject_Check(o) PyObject_TypeCheck(o, &PkgIterator_Type)
+
+PyObject *Object_FromPkgIterator(cr_PkgIterator *iter);
+cr_PkgIterator *PkgIterator_FromPyObject(PyObject *o);
 
 #endif

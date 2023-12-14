@@ -150,8 +150,8 @@ int cr_xml_parse_primary_snippet(const char *xml_string,
                                  int do_files,
                                  GError **err);
 
-/** Parse filelists.xml. File could be compressed.
- * @param path           Path to filelists.xml
+/** Parse filelists[_ext].xml. File could be compressed.
+ * @param path           Path to filelists[_ext].xml
  * @param newpkgcb       Callback for new package (Called when new package
  *                       xml chunk is found and package object to store
  *                       the data is needed). If NULL cr_newpkgcb is used.
@@ -174,9 +174,9 @@ int cr_xml_parse_filelists(const char *path,
                            void *warningcb_data,
                            GError **err);
 
-/** Parse string snippet of filelists xml repodata. Snippet cannot contain
- * root xml element <filelists>. It contains only <package> elemetns.
- * @param xml_string     String containg filelists xml data
+/** Parse string snippet of filelists[_ext] xml repodata. Snippet cannot contain
+ * root xml element <filelists[_ext]>. It contains only <package> elemetns.
+ * @param xml_string     String containg filelists[_ext] xml data
  * @param newpkgcb       Callback for new package (Called when new package
  *                       xml chunk is found and package object to store
  *                       the data is needed). If NULL cr_newpkgcb is used.
@@ -277,6 +277,21 @@ cr_xml_parse_updateinfo(const char *path,
                         cr_XmlParserWarningCb warningcb,
                         void *warningcb_data,
                         GError **err);
+
+typedef struct _cr_PkgIterator cr_PkgIterator;
+
+cr_PkgIterator *
+cr_PkgIterator_new(const char *primary_path,
+                   const char *filelists_path,
+                   const char *other_path,
+                   cr_XmlParserNewPkgCb newpkgcb,
+                   void *newpkgcb_data,
+                   cr_XmlParserWarningCb warningcb,
+                   void *warningcb_data,
+                   GError **err);
+cr_Package* cr_PkgIterator_parse_next(cr_PkgIterator *iter, GError **err);
+void cr_PkgIterator_free(cr_PkgIterator *iter, GError **err);
+gboolean cr_PkgIterator_is_finished(cr_PkgIterator *iter);
 
 /** @} */
 

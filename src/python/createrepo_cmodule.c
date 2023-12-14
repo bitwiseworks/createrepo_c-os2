@@ -57,6 +57,8 @@ static struct PyMethodDef createrepo_c_methods[] = {
         METH_VARARGS, xml_dump_primary__doc__},
     {"xml_dump_filelists",      (PyCFunction)py_xml_dump_filelists,
         METH_VARARGS, xml_dump_filelists__doc__},
+    {"xml_dump_filelists_ext",  (PyCFunction)py_xml_dump_filelists_ext,
+        METH_VARARGS, xml_dump_filelists_ext__doc__},
     {"xml_dump_other",          (PyCFunction)py_xml_dump_other,
         METH_VARARGS, xml_dump_other__doc__},
     {"xml_dump_updaterecord",    (PyCFunction)py_xml_dump_updaterecord,
@@ -215,6 +217,12 @@ PyInit__createrepo_c(void)
     Py_INCREF(&XmlFile_Type);
     PyModule_AddObject(m, "XmlFile", (PyObject *)&XmlFile_Type);
 
+    /* _createrepo_c.PkgIterator */
+    if (PyType_Ready(&PkgIterator_Type) < 0)
+        return NULL;
+    Py_INCREF(&PkgIterator_Type);
+    PyModule_AddObject(m, "PkgIterator", (PyObject *)&PkgIterator_Type);
+
     /* Createrepo init */
 
     cr_xml_dump_init();
@@ -236,9 +244,11 @@ PyInit__createrepo_c(void)
 
     /* Checksum types */
     PyModule_AddIntConstant(m, "CHECKSUM_UNKNOWN", CR_CHECKSUM_UNKNOWN);
+#ifdef WITH_LEGACY_HASHES
     PyModule_AddIntConstant(m, "MD5", CR_CHECKSUM_MD5);
     PyModule_AddIntConstant(m, "SHA", CR_CHECKSUM_SHA);
     PyModule_AddIntConstant(m, "SHA1", CR_CHECKSUM_SHA1);
+#endif
     PyModule_AddIntConstant(m, "SHA224", CR_CHECKSUM_SHA224);
     PyModule_AddIntConstant(m, "SHA256", CR_CHECKSUM_SHA256);
     PyModule_AddIntConstant(m, "SHA384", CR_CHECKSUM_SHA384);
@@ -256,6 +266,7 @@ PyInit__createrepo_c(void)
     PyModule_AddIntConstant(m, "BZ2_COMPRESSION", CR_CW_BZ2_COMPRESSION);
     PyModule_AddIntConstant(m, "XZ_COMPRESSION", CR_CW_XZ_COMPRESSION);
     PyModule_AddIntConstant(m, "ZCK_COMPRESSION", CR_CW_ZCK_COMPRESSION);
+    PyModule_AddIntConstant(m, "ZSTD_COMPRESSION", CR_CW_ZSTD_COMPRESSION);
 
     /* Zchunk support */
 #ifdef WITH_ZCHUNK
@@ -277,11 +288,13 @@ PyInit__createrepo_c(void)
     /* Sqlite DB types */
     PyModule_AddIntConstant(m, "DB_PRIMARY", CR_DB_PRIMARY);
     PyModule_AddIntConstant(m, "DB_FILELISTS", CR_DB_FILELISTS);
+    PyModule_AddIntConstant(m, "DB_FILELISTS_EXT", CR_DB_FILELISTS_EXT);
     PyModule_AddIntConstant(m, "DB_OTHER", CR_DB_OTHER);
 
     /* XmlFile types */
     PyModule_AddIntConstant(m, "XMLFILE_PRIMARY", CR_XMLFILE_PRIMARY);
     PyModule_AddIntConstant(m, "XMLFILE_FILELISTS", CR_XMLFILE_FILELISTS);
+    PyModule_AddIntConstant(m, "XMLFILE_FILELISTS_EXT", CR_XMLFILE_FILELISTS_EXT);
     PyModule_AddIntConstant(m, "XMLFILE_OTHER", CR_XMLFILE_OTHER);
     PyModule_AddIntConstant(m, "XMLFILE_PRESTODELTA", CR_XMLFILE_PRESTODELTA);
     PyModule_AddIntConstant(m, "XMLFILE_UPDATEINFO", CR_XMLFILE_UPDATEINFO);

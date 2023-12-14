@@ -90,6 +90,9 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         return;
     }
 
+    gboolean free_attr = FALSE;
+    attr = unescape_ampersand_from_values(attr, &free_attr);
+
     // Update parser data
     pd->state      = sw->to;
     pd->docontent  = sw->docontent;
@@ -206,6 +209,10 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
     default:
         break;
     }
+
+    if (free_attr) {
+        g_strfreev((char **)attr);
+    }
 }
 
 static void XMLCALL
@@ -277,24 +284,17 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
     }
 }
 
-int
-cr_xml_parse_other_internal(const char *target,
-                            cr_XmlParserNewPkgCb newpkgcb,
-                            void *newpkgcb_data,
-                            cr_XmlParserPkgCb pkgcb,
-                            void *pkgcb_data,
-                            cr_XmlParserWarningCb warningcb,
-                            void *warningcb_data,
-                            int (*parser_func)(xmlParserCtxtPtr, cr_ParserData *, const char *, GError**),
-                            GError **err)
+cr_ParserData *
+other_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                      void *newpkgcb_data,
+                      cr_XmlParserPkgCb pkgcb,
+                      void *pkgcb_data,
+                      cr_XmlParserWarningCb warningcb,
+                      void *warningcb_data)
 {
-    int ret = CRE_OK;
     cr_ParserData *pd;
-    GError *tmp_err = NULL;
 
-    assert(target);
     assert(newpkgcb || pkgcb);
-    assert(!err || *err == NULL);
 
     if (!newpkgcb)  // Use default newpkgcb
         newpkgcb = cr_newpkgcb;
@@ -308,10 +308,7 @@ cr_xml_parse_other_internal(const char *target,
 
     pd = cr_xml_parser_data(NUMSTATES);
 
-    xmlParserCtxtPtr parser;
-    parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
-
-    pd->parser = parser;
+    pd->parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
     pd->state = STATE_START;
     pd->newpkgcb_data = newpkgcb_data;
     pd->newpkgcb = newpkgcb;
@@ -325,9 +322,32 @@ cr_xml_parse_other_internal(const char *target,
         pd->sbtab[sw->to] = sw->from;
     }
 
+    return pd;
+}
+
+int
+cr_xml_parse_other_internal(const char *target,
+                            cr_XmlParserNewPkgCb newpkgcb,
+                            void *newpkgcb_data,
+                            cr_XmlParserPkgCb pkgcb,
+                            void *pkgcb_data,
+                            cr_XmlParserWarningCb warningcb,
+                            void *warningcb_data,
+                            int (*parser_func)(xmlParserCtxtPtr, cr_ParserData *, const char *, GError**),
+                            GError **err)
+{
+    int ret = CRE_OK;
+    GError *tmp_err = NULL;
+
+    assert(target);
+    assert(!err || *err == NULL);
+
+    cr_ParserData *pd;
+    pd = other_parser_data_new(newpkgcb, newpkgcb_data, pkgcb, pkgcb_data, warningcb, warningcb_data);
+
     // Parsing
 
-    ret = parser_func(parser, pd, target, &tmp_err);
+    ret = parser_func(pd->parser, pd, target, &tmp_err);
 
     if (tmp_err)
         g_propagate_error(err, tmp_err);
@@ -353,7 +373,6 @@ cr_xml_parse_other_internal(const char *target,
     }
 
     cr_xml_parser_data_free(pd);
-    xmlFreeParserCtxt(parser);
 
     return ret;
 }
@@ -382,9 +401,9 @@ cr_xml_parse_other_snippet(const char *xml_string,
                            void *warningcb_data,
                            GError **err)
 {
-    char* wrapped_xml_string = g_strconcat("<otherdata>", xml_string, "</otherdata>", NULL);
+    gchar* wrapped_xml_string = g_strconcat("<otherdata>", xml_string, "</otherdata>", NULL);
     int ret = cr_xml_parse_other_internal(wrapped_xml_string, newpkgcb, newpkgcb_data, pkgcb, pkgcb_data,
                                           warningcb, warningcb_data, &cr_xml_parser_generic_from_string, err);
-    free(wrapped_xml_string);
+    g_free(wrapped_xml_string);
     return ret;
 }

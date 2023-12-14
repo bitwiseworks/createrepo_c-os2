@@ -60,8 +60,13 @@ cr_metadatalocation_free(struct cr_MetadataLocation *ml)
         cr_remove_dir(ml->local_path, NULL);
     }
 
+    if (ml->repomd_data) {
+        cr_repomd_free(ml->repomd_data);
+    }
+
     g_free(ml->pri_xml_href);
     g_free(ml->fil_xml_href);
+    g_free(ml->fex_xml_href);
     g_free(ml->oth_xml_href);
     g_free(ml->pri_sqlite_href);
     g_free(ml->fil_sqlite_href);
@@ -146,6 +151,7 @@ cr_parse_repomd(const char *repomd_path,
     mdloc = g_malloc0(sizeof(struct cr_MetadataLocation));
     mdloc->repomd = g_strdup(repomd_path);
     mdloc->local_path = g_strdup(repopath);
+    mdloc->repomd_data = repomd;
 
     for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
         cr_RepomdRecord *record = elem->data;
@@ -163,12 +169,17 @@ cr_parse_repomd(const char *repomd_path,
             mdloc->fil_xml_href = full_location_href;
         else if (!g_strcmp0(record->type, "filelists_db") && !ignore_sqlite)
             mdloc->fil_sqlite_href = full_location_href;
+        else if (!g_strcmp0(record->type, "filelists-ext"))
+            mdloc->fex_xml_href = full_location_href;
+        else if (!g_strcmp0(record->type, "filelists-ext_db") && !ignore_sqlite)
+            mdloc->fex_sqlite_href = full_location_href;
         else if (!g_strcmp0(record->type, "other"))
             mdloc->oth_xml_href = full_location_href;
         else if (!g_strcmp0(record->type, "other_db") && !ignore_sqlite)
             mdloc->oth_sqlite_href = full_location_href;
         else if ( !g_str_has_prefix(record->type, "primary_"   ) &&
                   !g_str_has_prefix(record->type, "filelists_" ) && 
+                  !g_str_has_prefix(record->type, "filelists-ext_" ) && 
                   !g_str_has_prefix(record->type, "other_"     ) ) 
         {
             mdloc->additional_metadata = cr_insert_additional_metadatum(full_location_href,
@@ -178,8 +189,6 @@ cr_parse_repomd(const char *repomd_path,
         } else
             g_free(full_location_href);
     }
-
-    cr_repomd_free(repomd);
 
     return mdloc;
 }
@@ -201,7 +210,7 @@ cr_get_local_metadata(const char *repopath, gboolean ignore_sqlite)
     // Create path to repomd.xml and check if it exists
     repomd = g_build_filename(repopath, "repodata", "repomd.xml", NULL);
     if (!g_file_test(repomd, G_FILE_TEST_EXISTS)) {
-        g_debug("%s: %s doesn't exists", __func__, repomd);
+        g_debug("%s: %s doesn't exist", __func__, repomd);
         return ret;
     }
 
@@ -292,6 +301,8 @@ cr_get_remote_metadata(const char *repopath, gboolean ignore_sqlite)
         cr_download(handle, r_location->pri_xml_href, tmp_repodata, &tmp_err);
     if (!tmp_err && r_location->fil_xml_href)
         cr_download(handle, r_location->fil_xml_href, tmp_repodata, &tmp_err);
+    if (!tmp_err && r_location->fex_xml_href)
+        cr_download(handle, r_location->fex_xml_href, tmp_repodata, &tmp_err);
     if (!tmp_err && r_location->oth_xml_href)
         cr_download(handle, r_location->oth_xml_href, tmp_repodata, &tmp_err);
     if (!tmp_err && r_location->pri_sqlite_href)

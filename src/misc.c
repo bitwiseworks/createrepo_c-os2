@@ -17,10 +17,9 @@
  * USA.
  */
 
-#define _XOPEN_SOURCE 500
-
 #include <glib/gstdio.h>
 #include <glib.h>
+#include <gio/gio.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <curl/curl.h>
@@ -239,16 +238,30 @@ cr_is_primary(const char *filename)
 }
 */
 
-#define VAL_LEN         4       // Len of numeric values in rpm
+#define VAL_LEN         4       // Len of numeric values in rpm (bytes)
 
 struct cr_HeaderRangeStruct
 cr_get_header_byte_range(const char *filename, GError **err)
 {
-    /* Values readed by fread are 4 bytes long and stored as big-endian.
-     * So there is htonl function to convert this big-endian number into host
-     * byte order.
-     */
-
+    // Lead is 96 bytes.
+    //
+    // Each Header starts like this (16 bytes)
+    // 3 bytes for the magic
+    // 1 byte RPM version number - always 1
+    // 4 reserved bytes (no meaning, just padding)
+    // 4 bytes for the number of entries in the index (u32)
+    // 4 bytes for the length of the data section (u32)
+    //
+    // Next comes a series of index entries. Each index entry is 16 bytes
+    // 4 bytes for the tag (u32)
+    // 4 bytes for the tag data type (u32)
+    // 4 bytes for the offset relative to the beginning of the data store
+    // 4 bytes for the count that contains the number of data items pointed to by the index entry
+    //
+    // After the header entries comes the data section. This stores the data pointed to by
+    // the offsets within each index entry.
+    //
+    // All numeric values are big-endian and need to be converted into host byte order.
     struct cr_HeaderRangeStruct results;
 
     assert(!err || *err == NULL);
@@ -256,26 +269,24 @@ cr_get_header_byte_range(const char *filename, GError **err)
     results.start = 0;
     results.end   = 0;
 
-
     // Open file
-
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
+        const gchar * fopen_error = g_strerror(errno);
         g_debug("%s: Cannot open file %s (%s)", __func__, filename,
-                g_strerror(errno));
+                fopen_error);
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Cannot open %s: %s", filename, g_strerror(errno));
+                    "Cannot open %s: %s", filename, fopen_error);
         return results;
     }
 
-
     // Get header range
-
+    // Seek to Lead (96) + 8 bytes and read the number of entries in the signature header, then convert to host byte order
     if (fseek(fp, 104, SEEK_SET) != 0) {
-        g_debug("%s: fseek fail on %s (%s)", __func__, filename,
-                g_strerror(errno));
+        const gchar * fseek_error = g_strerror(errno);
+        g_debug("%s: fseek fail on %s (%s)", __func__, filename, fseek_error);
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Cannot seek over %s: %s", filename, g_strerror(errno));
+                    "Cannot seek over %s: %s", filename, fseek_error);
         fclose(fp);
         return results;
     }
@@ -289,6 +300,7 @@ cr_get_header_byte_range(const char *filename, GError **err)
         return results;
     }
     sigindex = htonl(sigindex);
+    // Read the length of the data section and convert to host byte order
     if (fread(&sigdata, VAL_LEN, 1, fp) != 1) {
         g_set_error(err, ERR_DOMAIN, CRE_IO,
                     "fread() error on %s: %s", filename, g_strerror(errno));
@@ -297,6 +309,7 @@ cr_get_header_byte_range(const char *filename, GError **err)
     }
     sigdata = htonl(sigdata);
 
+    // Lead (96) + HeaderIndex (16) = 112. Index entries are 16 bytes each. Include padding to align to 8 bytes
     unsigned int sigindexsize = sigindex * 16;
     unsigned int sigsize = sigdata + sigindexsize;
     unsigned int disttoboundary = sigsize % 8;
@@ -305,6 +318,7 @@ cr_get_header_byte_range(const char *filename, GError **err)
     }
     unsigned int hdrstart = 112 + sigsize + disttoboundary;
 
+    // Seek to start of header (96) + 8 bytes and read the number of entries in the header, then convert to host byte order
     fseek(fp, hdrstart, SEEK_SET);
     fseek(fp, 8, SEEK_CUR);
 
@@ -317,6 +331,7 @@ cr_get_header_byte_range(const char *filename, GError **err)
         return results;
     }
     hdrindex = htonl(hdrindex);
+    // Read the length of the data section and convert to host byte order
     if (fread(&hdrdata, VAL_LEN, 1, fp) != 1) {
         g_set_error(err, ERR_DOMAIN, CRE_IO,
                     "fread() error on %s: %s", filename, g_strerror(errno));
@@ -324,15 +339,14 @@ cr_get_header_byte_range(const char *filename, GError **err)
         return results;
     }
     hdrdata = htonl(hdrdata);
+    // Calculate the end of the header
     unsigned int hdrindexsize = hdrindex * 16;
     unsigned int hdrsize = hdrdata + hdrindexsize + 16;
     unsigned int hdrend = hdrstart + hdrsize;
 
     fclose(fp);
 
-
     // Check sanity
-
     if (hdrend < hdrstart) {
         g_debug("%s: sanity check fail on %s (%d > %d))", __func__,
                 filename, hdrstart, hdrend);
@@ -406,19 +420,21 @@ cr_copy_file(const char *src, const char *in_dst, GError **err)
 
     // Open src file
     if ((orig = fopen(src, "rb")) == NULL) {
+        const gchar * fopen_error = g_strerror(errno);
         g_debug("%s: Cannot open source file %s (%s)", __func__, src,
-                g_strerror(errno));
+                fopen_error);
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Cannot open file %s: %s", src, g_strerror(errno));
+                    "Cannot open file %s: %s", src, fopen_error);
         return FALSE;
     }
 
     // Open dst file
     if ((new = fopen(dst, "wb")) == NULL) {
+        const gchar * fopen_error = g_strerror(errno);
         g_debug("%s: Cannot open destination file %s (%s)", __func__, dst,
-                g_strerror(errno));
+                fopen_error);
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Cannot open file %s: %s", dst, g_strerror(errno));
+                    "Cannot open file %s: %s", dst, fopen_error);
         return FALSE;
     }
 
@@ -431,10 +447,11 @@ cr_copy_file(const char *src, const char *in_dst, GError **err)
         }
 
         if (fwrite(buf, 1, readed, new) != readed) {
+            const gchar * fwrite_error = g_strerror(errno);
             g_debug("%s: Error while copy %s -> %s (%s)", __func__, src,
-                    dst, g_strerror(errno));
+                    dst, fwrite_error);
             g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Error while write %s: %s", dst, g_strerror(errno));
+                    "Error while write %s: %s", dst, fwrite_error);
             return FALSE;
         }
     }
@@ -531,6 +548,7 @@ cr_compress_file_with_stat(const char *src,
             g_set_error(err, ERR_DOMAIN, CRE_IO,
                         "Error reading zchunk dict %s: %s",
                         dict_file, tmp_err->message);
+            g_clear_error(&tmp_err);
             ret = CRE_IO;
             goto compress_file_cleanup;
         }
@@ -621,6 +639,12 @@ cr_decompress_file_with_stat(const char *src,
 
     if (!in_dst || g_str_has_suffix(in_dst, "/")) {
         char *filename = cr_get_filename(src);
+        if (!filename) {
+            g_debug("%s: Cannot get filename from: %s", __func__, src);
+            g_set_error(err, ERR_DOMAIN, CRE_NOFILE,
+                        "Cannot get filename from: %s", src);
+            return CRE_NOFILE;
+        }
         if (g_str_has_suffix(filename, c_suffix)) {
             filename = g_strndup(filename, strlen(filename) - strlen(c_suffix));
         } else {
@@ -651,10 +675,11 @@ cr_decompress_file_with_stat(const char *src,
 
     new = fopen(dst, "wb");
     if (!new) {
+        const gchar * fopen_error = g_strerror(errno);
         g_debug("%s: Cannot open destination file %s (%s)",
-                __func__, dst, g_strerror(errno));
+                __func__, dst, fopen_error);
         g_set_error(err, ERR_DOMAIN, CRE_IO,
-                    "Cannot open %s: %s", src, g_strerror(errno));
+                    "Cannot open %s: %s", src, fopen_error);
         ret = CRE_IO;
         goto compress_file_cleanup;
     }
@@ -670,10 +695,11 @@ cr_decompress_file_with_stat(const char *src,
         }
 
         if (fwrite(buf, 1, readed, new) != (size_t) readed) {
+            const gchar * fwrite_error = g_strerror(errno);
             g_debug("%s: Error while copy %s -> %s (%s)",
-                    __func__, src, dst, g_strerror(errno));
+                    __func__, src, dst, fwrite_error);
             g_set_error(err, ERR_DOMAIN, CRE_IO,
-                        "Error while write %s: %s", dst, g_strerror(errno));
+                        "Error while write %s: %s", dst, fwrite_error);
             ret = CRE_IO;
             goto compress_file_cleanup;
         }
@@ -734,6 +760,7 @@ cr_download(CURL *in_handle,
     errorbuf[0] = '\0';
     rcode = curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, errorbuf);
     if (rcode != CURLE_OK) {
+        curl_easy_cleanup(handle);
         g_set_error(err, ERR_DOMAIN, CRE_CURL,
                     "curl_easy_setopt failed(CURLOPT_ERRORBUFFER): %s",
                     curl_easy_strerror(rcode));
@@ -743,6 +770,7 @@ cr_download(CURL *in_handle,
     // Set URL
     rcode = curl_easy_setopt(handle, CURLOPT_URL, url);
     if (rcode != CURLE_OK) {
+        curl_easy_cleanup(handle);
         g_set_error(err, ERR_DOMAIN, CRE_CURL,
                     "curl_easy_setopt failed(CURLOPT_URL): %s",
                     curl_easy_strerror(rcode));
@@ -753,6 +781,7 @@ cr_download(CURL *in_handle,
     // Set output file descriptor
     rcode = curl_easy_setopt(handle, CURLOPT_WRITEDATA, file);
     if (rcode != CURLE_OK) {
+        curl_easy_cleanup(handle);
         g_set_error(err, ERR_DOMAIN, CRE_CURL,
                     "curl_easy_setopt(CURLOPT_WRITEDATA) failed: %s",
                     curl_easy_strerror(rcode));
@@ -763,6 +792,7 @@ cr_download(CURL *in_handle,
     // Download the file
     rcode = curl_easy_perform(handle);
     if (rcode != CURLE_OK) {
+        curl_easy_cleanup(handle);
         g_set_error(err, ERR_DOMAIN, CRE_CURL,
                     "curl_easy_perform failed: %s: %s",
                     curl_easy_strerror(rcode), errorbuf);
@@ -770,12 +800,12 @@ cr_download(CURL *in_handle,
         return CRE_CURL;
     }
 
+    curl_easy_cleanup(handle);
+
     g_debug("%s: Successfully downloaded: %s", __func__, dst);
 
     return CRE_OK;
 }
-
-
 
 gboolean
 cr_better_copy_file(const char *src, const char *in_dst, GError **err)
@@ -800,7 +830,6 @@ cr_better_copy_file(const char *src, const char *in_dst, GError **err)
 
     return TRUE;
 }
-
 
 int
 cr_remove_dir_cb(const char *fpath,
@@ -833,6 +862,23 @@ cr_remove_dir(const char *path, GError **err)
     return CRE_OK;
 }
 
+gboolean
+cr_move_recursive(const char *srcDir, const char *dstDir, GError **err)
+{
+    if (rename(srcDir, dstDir) == -1) {
+        GFile * gsrcDir = g_file_new_for_path(srcDir);
+        GFile * gdstDir = g_file_new_for_path(dstDir);
+        if (!cr_gio_cp(gsrcDir, gdstDir, G_FILE_COPY_ALL_METADATA, NULL, err)) {
+            g_object_unref(gsrcDir);
+            g_object_unref(gdstDir);
+            return FALSE;
+        }
+        g_object_unref(gsrcDir);
+        g_object_unref(gdstDir);
+        return (cr_remove_dir(srcDir, err) == CRE_OK);
+    }
+    return TRUE;
+}
 
 // Return path with exactly one trailing '/'
 char *
@@ -918,10 +964,7 @@ cr_str_to_version(const char *str)
         // Whole string has been converted successfully
         return ver;
     } else {
-        if (endptr[0] == '.') {
-            // '.' is supposed to be delimiter -> skip it and go to next chunk
-            ptr = endptr+1;
-        } else {
+        if (endptr[0] != '.') { // '.' is supposed to be delimiter
             ver.suffix = g_strdup(endptr);
             return ver;
         }
@@ -1045,6 +1088,7 @@ cr_split_rpm_filename(const char *filename)
             g_free(str);
             str = filename_epoch[0];
             epoch = filename_epoch[1];
+            g_free(filename_epoch);
         } else {
             g_strfreev(filename_epoch);
         }
@@ -1060,6 +1104,10 @@ cr_split_rpm_filename(const char *filename)
 
     nevra = cr_str_to_nevra(str);
     g_free(str);
+    if (!nevra) {
+        g_free(epoch);
+        return NULL;
+    }
 
     if (epoch) {
         g_free(nevra->epoch);
@@ -1136,7 +1184,6 @@ cr_str_to_nevr(const char *instr)
         if (nvr[i] == '-') {
             nevr->version = g_strdup(nvr+i+1);
             nvr[i] = '\0';
-            len = i;
             break;
         }
 
@@ -1180,7 +1227,6 @@ cr_str_to_nevra(const char *instr)
     cr_NEVR *nevr;
     cr_NEVRA *nevra = NULL;
     gchar *str, *epoch = NULL;
-    size_t len;
     int i;
 
     if (!instr)
@@ -1199,20 +1245,19 @@ cr_str_to_nevra(const char *instr)
         {
             // Strip epoch from the very end
             epoch = epoch_candidate;
+            g_free(str);
             str = nvra_epoch[0];
+            g_free(nvra_epoch);
         } else {
             g_strfreev(nvra_epoch);
         }
     }
 
-    len = strlen(str);
-
     // Get arch
-    for (i = len-1; i >= 0; i--)
+    for (i = strlen(str)-1; i >= 0; i--)
         if (str[i] == '.') {
             nevra->arch = g_strdup(str+i+1);
             str[i] = '\0';
-            len = i;
             break;
         }
 
@@ -1220,10 +1265,19 @@ cr_str_to_nevra(const char *instr)
         g_warning("Invalid arch %s", nevra->arch);
         cr_nevra_free(nevra);
         g_free(str);
+        g_free(epoch);
         return NULL;
     }
 
     nevr = cr_str_to_nevr(str);
+    if (!nevr) {
+        g_warning("Invalid nevr %s", str);
+        cr_nevra_free(nevra);
+        g_free(str);
+        g_free(epoch);
+        return NULL;
+    }
+
     nevra->name     = nevr->name;
     nevra->epoch    = nevr->epoch;
     nevra->version  = nevr->version;
@@ -1395,6 +1449,44 @@ cr_cp(const char *src,
 }
 
 gboolean
+cr_gio_cp(GFile *src,
+      GFile *dst,
+      GFileCopyFlags flags,
+      GCancellable *cancellable,
+      GError **err)
+{
+    assert(src);
+    assert(dst);
+    assert(!err || *err == NULL);
+
+    GFileType type = g_file_query_file_type(src, G_FILE_QUERY_INFO_NONE, NULL);
+
+    if (type == G_FILE_TYPE_DIRECTORY) {
+        g_file_make_directory(dst, cancellable, err);
+        g_file_copy_attributes(src, dst, flags, cancellable, err);
+
+        GFileEnumerator *enumerator = g_file_enumerate_children(src, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NONE, cancellable, err);
+        for (GFileInfo *info = g_file_enumerator_next_file(enumerator, cancellable, err); info != NULL; info = g_file_enumerator_next_file(enumerator, cancellable, err)) {
+            const char *relative_path = g_file_info_get_name(info);
+            cr_gio_cp(
+                g_file_resolve_relative_path(src, relative_path),
+                g_file_resolve_relative_path(dst, relative_path),
+                flags, cancellable, err);
+        }
+    } else if (type == G_FILE_TYPE_REGULAR) {
+        g_file_copy(src, dst, flags, cancellable, NULL, NULL, err);
+    }
+
+    if (err != NULL) {
+        return TRUE;
+    }
+    else {
+        return FALSE;
+    }
+
+}
+
+gboolean
 cr_rm(const char *path,
       cr_RmFlags flags,
       const char *working_dir,
@@ -1431,11 +1523,11 @@ cr_append_pid_and_datetime(const char *str, const char *suffix)
     gettimeofday(&tv, NULL);
     timeinfo = localtime (&(tv.tv_sec));
     strftime(datetime, 80, "%Y%m%d%H%M%S", timeinfo);
-    gchar *result = g_strdup_printf("%s%jd.%s.%ld%s",
+    gchar *result = g_strdup_printf("%s%jd.%s.%jd%s",
                                     str ? str : "",
                                     (intmax_t) getpid(),
                                     datetime,
-                                    tv.tv_usec,
+                                    (intmax_t) tv.tv_usec,
                                     suffix ? suffix : "");
     return result;
 }
@@ -1587,7 +1679,7 @@ cr_get_dict_file(const gchar *dir, const gchar *file)
     free(dict_file);
     if (!g_file_test(full_path, G_FILE_TEST_EXISTS)) {
         g_warning("%s: Zchunk dict %s doesn't exist", __func__, full_path);
-        free(full_path);
+        g_free(full_path);
         return NULL;
     }
     return full_path;

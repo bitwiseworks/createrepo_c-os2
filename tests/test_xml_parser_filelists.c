@@ -88,6 +88,25 @@ newpkgcb_skip_fake_bash(cr_Package **pkg,
     return CR_CB_RET_OK;
 }
 
+// Keep reference to the new package so we can free it in case of an interrupt
+static int
+newpkgcb_ref(cr_Package **pkg,
+             G_GNUC_UNUSED const char *pkgId,
+             G_GNUC_UNUSED const char *name,
+             G_GNUC_UNUSED const char *arch,
+             G_GNUC_UNUSED void *cbdata,
+             GError **err)
+{
+    g_assert(pkg != NULL);
+    g_assert(*pkg == NULL);
+    g_assert(pkgId != NULL);
+    g_assert(!err || *err == NULL);
+
+    *pkg = cr_package_new();
+    if (cbdata) *((cr_Package **)cbdata) = *pkg;
+    return CR_CB_RET_OK;
+}
+
 static int
 newpkgcb_interrupt(cr_Package **pkg,
                    G_GNUC_UNUSED const char *pkgId,
@@ -165,6 +184,18 @@ test_cr_xml_parse_filelists_02(void)
     int parsed = 0;
     GError *tmp_err = NULL;
     int ret = cr_xml_parse_filelists(TEST_REPO_02_FILELISTS, NULL, NULL,
+                                     pkgcb, &parsed, NULL, NULL, &tmp_err);
+    g_assert(tmp_err == NULL);
+    g_assert_cmpint(ret, ==, CRE_OK);
+    g_assert_cmpint(parsed, ==, 2);
+}
+
+static void
+test_cr_xml_parse_filelists_ext_04(void)
+{
+    int parsed = 0;
+    GError *tmp_err = NULL;
+    int ret = cr_xml_parse_filelists(TEST_REPO_04_FILELISTS_EXT, NULL, NULL,
                                      pkgcb, &parsed, NULL, NULL, &tmp_err);
     g_assert(tmp_err == NULL);
     g_assert_cmpint(ret, ==, CRE_OK);
@@ -259,6 +290,19 @@ test_cr_xml_parse_filelists_pkgcb_interrupt(void)
 }
 
 static void
+test_cr_xml_parse_filelists_ext_pkgcb_interrupt(void)
+{
+    int parsed = 0;
+    GError *tmp_err = NULL;
+    int ret = cr_xml_parse_filelists(TEST_REPO_04_FILELISTS_EXT, NULL, NULL,
+                            pkgcb_interrupt, &parsed, NULL, NULL, &tmp_err);
+    g_assert(tmp_err != NULL);
+    g_error_free(tmp_err);
+    g_assert_cmpint(ret, ==, CRE_CBINTERRUPTED);
+    g_assert_cmpint(parsed, ==, 1);
+}
+
+static void
 test_cr_xml_parse_filelists_newpkgcb_interrupt(void)
 {
     int parsed = 0;
@@ -273,12 +317,27 @@ test_cr_xml_parse_filelists_newpkgcb_interrupt(void)
 }
 
 static void
+test_cr_xml_parse_filelists_ext_newpkgcb_interrupt(void)
+{
+    int parsed = 0;
+    GError *tmp_err = NULL;
+    int ret = cr_xml_parse_filelists(TEST_REPO_04_FILELISTS_EXT,
+                                     newpkgcb_interrupt, NULL,
+                                     pkgcb, &parsed,  NULL, NULL, &tmp_err);
+    g_assert(tmp_err != NULL);
+    g_error_free(tmp_err);
+    g_assert_cmpint(ret, ==, CRE_CBINTERRUPTED);
+    g_assert_cmpint(parsed, ==, 0);
+}
+
+static void
 test_cr_xml_parse_filelists_warningcb_interrupt(void)
 {
     int parsed = 0, numofwarnings = 0;
+    cr_Package *pkgref;
     GError *tmp_err = NULL;
     int ret = cr_xml_parse_filelists(TEST_MRF_BAD_TYPE_FIL,
-                                     NULL, NULL,
+                                     newpkgcb_ref, &pkgref,
                                      pkgcb, &parsed,  warningcb_interrupt,
                                      &numofwarnings, &tmp_err);
     g_assert(tmp_err != NULL);
@@ -286,6 +345,7 @@ test_cr_xml_parse_filelists_warningcb_interrupt(void)
     g_assert_cmpint(ret, ==, CRE_CBINTERRUPTED);
     g_assert_cmpint(parsed, ==, 1);
     g_assert_cmpint(numofwarnings, ==, 1);
+    cr_package_free(pkgref);
 }
 
 static void
@@ -364,6 +424,32 @@ test_cr_xml_parse_filelists_snippet_snippet_02(void)
     g_assert_cmpint(parsed, ==, 2);
 }
 
+static void
+test_cr_xml_parse_filelists_ext_snippet_snippet_01(void)
+{
+    int parsed = 0;
+    GError *tmp_err = NULL;
+    char buf[600];
+    read_file(TEST_FILELISTS_EXT_SNIPPET_01, CR_CW_AUTO_DETECT_COMPRESSION, buf, 600);
+    int ret = cr_xml_parse_filelists_snippet(buf, NULL, NULL, pkgcb, &parsed, NULL, NULL, &tmp_err);
+    g_assert(tmp_err == NULL);
+    g_assert_cmpint(ret, ==, CRE_OK);
+    g_assert_cmpint(parsed, ==, 1);
+}
+
+static void
+test_cr_xml_parse_filelists_ext_snippet_snippet_02(void)
+{
+    int parsed = 0;
+    GError *tmp_err = NULL;
+    char buf[800];
+    read_file(TEST_FILELISTS_EXT_SNIPPET_02, CR_CW_AUTO_DETECT_COMPRESSION, buf, 800);
+    int ret = cr_xml_parse_filelists_snippet(buf, NULL, NULL, pkgcb, &parsed, NULL, NULL, &tmp_err);
+    g_assert(tmp_err == NULL);
+    g_assert_cmpint(ret, ==, CRE_OK);
+    g_assert_cmpint(parsed, ==, 2);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -375,6 +461,8 @@ main(int argc, char *argv[])
                     test_cr_xml_parse_filelists_01);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_02",
                     test_cr_xml_parse_filelists_02);
+    g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_ext_04",
+                    test_cr_xml_parse_filelists_ext_04);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_unknown_element_00",
                     test_cr_xml_parse_filelists_unknown_element_00);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_unknown_element_01",
@@ -389,8 +477,12 @@ main(int argc, char *argv[])
                     test_cr_xml_parse_filelists_skip_fake_bash_01);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_pkgcb_interrupt",
                     test_cr_xml_parse_filelists_pkgcb_interrupt);
+    g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_ext_pkgcb_interrupt",
+                    test_cr_xml_parse_filelists_ext_pkgcb_interrupt);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_newpkgcb_interrupt",
                     test_cr_xml_parse_filelists_newpkgcb_interrupt);
+    g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_ext_newpkgcb_interrupt",
+                    test_cr_xml_parse_filelists_ext_newpkgcb_interrupt);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_warningcb_interrupt",
                     test_cr_xml_parse_filelists_warningcb_interrupt);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_bad_file_type_00",
@@ -403,5 +495,9 @@ main(int argc, char *argv[])
                     test_cr_xml_parse_filelists_snippet_snippet_01);
     g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_snippet_snippet_02",
                     test_cr_xml_parse_filelists_snippet_snippet_02);
+    g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_ext_snippet_snippet_01",
+                    test_cr_xml_parse_filelists_ext_snippet_snippet_01);
+    g_test_add_func("/xml_parser_filelists/test_cr_xml_parse_filelists_ext_snippet_snippet_02",
+                    test_cr_xml_parse_filelists_ext_snippet_snippet_02);
     return g_test_run();
 }

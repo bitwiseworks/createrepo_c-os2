@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH CREATEREPO_C 8 "2020-07-02" "" ""
+.TH CREATEREPO_C 8 "2021-09-23" "" ""
 .SH NAME
 createrepo_c \- Create rpm-md format (xml-rpm-metadata) repository
 .
@@ -39,7 +39,7 @@ createrepo_c [options] <directory>
 .sp
 Uses rpm packages from <directory> to create repodata.
 .sp
-If compiled with libmodulemd support modular metadata inside <directory> identified by the patterns below are automatically collected, merged and added to the repodata.
+If compiled with libmodulemd support modular metadata inside <directory> identified by the patterns below and all their compressed variants are automatically collected, merged and added to the repodata.
 .sp
 The patterns are:
 .INDENT 0.0
@@ -161,7 +161,7 @@ Number of workers to spawn to read rpms.
 Use xz for repodata compression.
 .SS \-\-compress\-type COMPRESSION_TYPE
 .sp
-Which compression type to use.
+Which compression type to use. Supported compressions are: bzip2, gzip, zck, zstd, xz.
 .SS \-\-general\-compress\-type COMPRESSION_TYPE
 .sp
 Which compression type to use (even for primary, filelists and other xml).
@@ -173,7 +173,10 @@ Generate zchunk files as well as the standard repodata.
 Directory containing compression dictionaries for use by zchunk
 .SS \-\-keep\-all\-metadata
 .sp
-Keep all additional metadata (not primary, filelists and other xml or sqlite files, nor their compressed variants) from source repository during update.
+Keep all additional metadata (not primary, filelists and other xml or sqlite files, nor their compressed variants) from source repository during update (default).
+.SS \-\-discard\-additional\-metadata
+.sp
+Discard all additional metadata (not primary, filelists and other xml or sqlite files, nor their compressed variants) from source repository during update.
 .SS \-\-compatibility
 .sp
 Enforce maximal compatibility with classical createrepo (Affects only: \-\-retain\-old\-md).
@@ -209,7 +212,7 @@ Append this prefix before location_href in output repodata
 Checksum type to be used in repomd.xml
 .SS \-\-error\-exit\-val
 .sp
-Exit with retval 2 if there were any errors during processing
+Exit with retval 2 if there were any errors during processing (option deprecated, on by default)
 .SS \-\-ignore\-lock
 .sp
 Expert (risky) option: Ignore an existing .repodata/. (Remove the existing .repodata/ and create an empty new one to serve as a lock for other createrepo instances. For the repodata generation, a different temporary dir with the name in format .repodata.time.microseconds.pid/ will be used). NOTE: Use this option on your own risk! If two createrepos run simultaneously, then the state of the generated metadata is not guaranteed \- it can be inconsistent and wrong.

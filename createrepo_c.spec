@@ -4,7 +4,7 @@
 
 %global bash_completion %{_datadir}/bash-completion/completions/*
 
-%if 0%{?rhel} && ( 0%{?rhel} <= 7 || 0%{?rhel} >= 9 )
+%if ( 0%{?rhel} && ( 0%{?rhel} <= 7 || 0%{?rhel} >= 9 ) ) || ( 0%{?fedora} && 0%{?fedora} >= 39 )
 %bcond_with drpm
 %else
 %bcond_without drpm
@@ -16,17 +16,25 @@
 %bcond_without zchunk
 %endif
 
-%if 0%{?rhel} && 0%{?rhel} < 8
+%if 0%{?rhel} && 0%{?rhel} < 7
 %bcond_with libmodulemd
 %else
 %bcond_without libmodulemd
 %endif
 
+%if 0%{?rhel} && 0%{?rhel} <= 8
+%bcond_without legacy_hashes
+%else
+%bcond_with legacy_hashes
+%endif
+
+%bcond_with sanitizers
+
 Summary:        Creates a common metadata repository
 Name:           createrepo_c
-Version:        0.17.3
+Version:        1.0.2
 Release:        1%{?dist}
-License:        GPLv2+
+License:        GPL-2.0-or-later
 URL:            https://github.com/rpm-software-management/createrepo_c
 Source0:        %{url}/archive/%{version}/%{name}-%{version}.tar.gz
 
@@ -34,7 +42,6 @@ BuildRequires:  cmake
 BuildRequires:  gcc
 BuildRequires:  bzip2-devel
 BuildRequires:  doxygen
-BuildRequires:  file-devel
 BuildRequires:  glib2-devel >= 2.22.0
 BuildRequires:  libcurl-devel
 BuildRequires:  libxml2-devel
@@ -50,14 +57,27 @@ BuildRequires:  zchunk
 %endif
 %if %{with libmodulemd}
 BuildRequires:  pkgconfig(modulemd-2.0) >= %{libmodulemd_version}
+%if 0%{?rhel} && 0%{?rhel} <= 7
+BuildRequires:  libmodulemd2
+Requires:       libmodulemd2%{?_isa} >= %{libmodulemd_version}
+%else
 BuildRequires:  libmodulemd
 Requires:       libmodulemd%{?_isa} >= %{libmodulemd_version}
+%endif
 %endif
 Requires:       %{name}-libs =  %{version}-%{release}
 BuildRequires:  bash-completion
 Requires: rpm >= 4.9.0
 %if %{with drpm}
 BuildRequires:  drpm-devel >= 0.4.0
+%endif
+# dnf supports zstd since 8.4: https://bugzilla.redhat.com/show_bug.cgi?id=1914876
+BuildRequires:  pkgconfig(libzstd)
+
+%if %{with sanitizers}
+BuildRequires:  libasan
+BuildRequires:  liblsan
+BuildRequires:  libubsan
 %endif
 
 %if 0%{?fedora} || 0%{?rhel} > 7
@@ -90,6 +110,7 @@ These development files are for easy manipulation with a repodata.
 Summary:        Python 3 bindings for the createrepo_c library
 %{?python_provide:%python_provide python3-%{name}}
 BuildRequires:  python3-devel
+BuildRequires:  python3-setuptools
 BuildRequires:  python3-sphinx
 Requires:       %{name}-libs = %{version}-%{release}
 
@@ -107,7 +128,9 @@ pushd build-py3
   %cmake .. \
       -DWITH_ZCHUNK=%{?with_zchunk:ON}%{!?with_zchunk:OFF} \
       -DWITH_LIBMODULEMD=%{?with_libmodulemd:ON}%{!?with_libmodulemd:OFF} \
-      -DENABLE_DRPM=%{?with_drpm:ON}%{!?with_drpm:OFF}
+      -DWITH_LEGACY_HASHES=%{?with_legacy_hashes:ON}%{!?with_legacy_hashes:OFF} \
+      -DENABLE_DRPM=%{?with_drpm:ON}%{!?with_drpm:OFF} \
+      -DWITH_SANITIZERS=%{?with_sanitizers:ON}%{!?with_sanitizers:OFF}
   make %{?_smp_mflags} RPM_OPT_FLAGS="%{optflags}"
   # Build C documentation
   make doc-c

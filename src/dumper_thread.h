@@ -46,15 +46,23 @@ struct PoolTask {
     char* path;                     // Just path     - /foo/bar/packages
 };
 
+struct DuplicateLocation {
+    gchar *location;
+    cr_Package *pkg;
+};
+
 struct UserData {
     cr_XmlFile *pri_f;              // Opened compressed primary.xml.*
     cr_XmlFile *fil_f;              // Opened compressed filelists.xml.*
+    cr_XmlFile *fex_f;              // Opened compressed filelists-ext.xml.*
     cr_XmlFile *oth_f;              // Opened compressed other.xml.*
     cr_SqliteDb *pri_db;            // Primary db
     cr_SqliteDb *fil_db;            // Filelists db
+    cr_SqliteDb *fex_db;            // Filelists-ext db
     cr_SqliteDb *oth_db;            // Other db
     cr_XmlFile *pri_zck;            // Opened compressed primary.xml.zck
     cr_XmlFile *fil_zck;            // Opened compressed filelists.xml.zck
+    cr_XmlFile *fex_zck;            // Opened compressed filelists-ext.xml.zck
     cr_XmlFile *oth_zck;            // Opened compressed other.xml.zck
     char *prev_srpm;                // Previous srpm
     char *cur_srpm;                 // Current srpm
@@ -66,28 +74,37 @@ struct UserData {
     cr_ChecksumType checksum_type;  // Constant representing selected checksum
     const char *checksum_cachedir;  // Dir with cached checksums
     gboolean skip_symlinks;         // Skip symlinks
-    long task_count;                // Total number of task to process
+    gboolean filelists_ext;         // Include hashes (and create filelists-ext.*)
+    long task_count;                // Total number of tasks to process
     long package_count;             // Total number of packages processed
+    long skipped_count;             // Total number of explicitly skipped packages
+
+    // Duplicate package error checking
+    GMutex mutex_nevra_table;       // Mutex for the table of NEVRAs
+    GHashTable *nevra_table;        // Table of NEVRAs mapped to packages and their locations
 
     // Update stuff
     gboolean skip_stat;             // Skip stat() while updating
     cr_Metadata *old_metadata;      // Loaded metadata
-    GMutex mutex_old_md;           // Mutex for accessing old metadata
+    GMutex mutex_old_md;            // Mutex for accessing old metadata
 
     // Thread serialization
-    GMutex mutex_pri;              // Mutex for primary metadata
-    GMutex mutex_fil;              // Mutex for filelists metadata
-    GMutex mutex_oth;              // Mutex for other metadata
-    GCond cond_pri;                // Condition for primary metadata
-    GCond cond_fil;                // Condition for filelists metadata
-    GCond cond_oth;                // Condition for other metadata
+    GMutex mutex_pri;               // Mutex for primary metadata
+    GMutex mutex_fil;               // Mutex for filelists metadata
+    GMutex mutex_fex;               // Mutex for filelists-ext metadata
+    GMutex mutex_oth;               // Mutex for other metadata
+    GCond cond_pri;                 // Condition for primary metadata
+    GCond cond_fil;                 // Condition for filelists metadata
+    GCond cond_fex;                 // Condition for filelists-ext metadata
+    GCond cond_oth;                 // Condition for other metadata
     volatile long id_pri;           // ID of task on turn (write primary metadata)
     volatile long id_fil;           // ID of task on turn (write filelists metadata)
+    volatile long id_fex;           // ID of task on turn (write filelists-ext metadata)
     volatile long id_oth;           // ID of task on turn (write other metadata)
 
     // Buffering
     GQueue *buffer;                 // Buffer for done tasks
-    GMutex mutex_buffer;           // Mutex for accessing the buffer
+    GMutex mutex_buffer;            // Mutex for accessing the buffer
 
     // Delta generation
     gboolean deltas;                // Are deltas enabled?
@@ -105,11 +122,19 @@ struct UserData {
 
     FILE *output_pkg_list;          // File where a list of read packages is written
     GMutex mutex_output_pkg_list;   // Mutex for output_pkg_list file
+    GArray *delayed_write;          // Dump these files once all packages are loaded
 };
 
 
 void
 cr_dumper_thread(gpointer data, gpointer user_data);
+
+
+void
+cr_delayed_dump_set(gpointer user_data);
+
+void
+cr_delayed_dump_run(gpointer user_data);
 
 /** @} */
 

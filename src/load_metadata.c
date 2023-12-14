@@ -177,7 +177,7 @@ typedef struct {
         (they have different basenames, mtimes or sizes),
         then we want to ignore these packages during
         loading. It's because the pkgId is used to pair metadata from
-        primary.xml with metadata from filelists.xml and other.xml and
+        primary.xml with metadata from filelists[_ext].xml and other.xml and
         we want the pkgId to be unique.
         Key is pkgId and value is NULL. */
     cr_ParsingState state;
@@ -457,37 +457,37 @@ module_read_fn (void *data,
 
 #ifdef WITH_LIBMODULEMD
 int
-cr_metadata_load_modulemd(cr_Metadata *md,
-                          struct cr_MetadataLocation *ml,
+cr_metadata_load_modulemd(ModulemdModuleIndex **moduleindex,
+                          gchar *path_to_md,
                           GError **err)
 {
     int ret;
     gboolean result;
     GError *tmp_err = NULL;
+    const GError *subdoc_error = NULL;
     CR_FILE *modulemd = NULL;
     g_autoptr (GPtrArray) failures = NULL;
 
-    md->moduleindex = modulemd_module_index_new();
-    if (!md->moduleindex) {
+    *moduleindex = modulemd_module_index_new();
+    if (!*moduleindex) {
         g_set_error (err, ERR_DOMAIN, CRE_MEMORY,
                      "Could not allocate module index");
         return CRE_MEMORY;
     }
 
-    cr_Metadatum *modulemd_metadatum = g_slist_find_custom(ml->additional_metadata, "modules", cr_cmp_metadatum_type)->data;
     /* Open the metadata location */
-    modulemd = cr_open(modulemd_metadatum->name,
+    modulemd = cr_open(path_to_md,
                        CR_CW_MODE_READ,
                        CR_CW_AUTO_DETECT_COMPRESSION,
                        &tmp_err);
     if (tmp_err) {
         int code = tmp_err->code;
         g_propagate_prefixed_error(err, tmp_err, "Cannot open %s: ",
-                                   modulemd_metadatum->name);
+                                   path_to_md);
         return code;
     }
 
-    result = modulemd_module_index_update_from_custom (md->moduleindex,
+    result = modulemd_module_index_update_from_custom (*moduleindex,
                                                        module_read_fn,
                                                        modulemd,
                                                        TRUE,
@@ -495,9 +495,21 @@ cr_metadata_load_modulemd(cr_Metadata *md,
                                                        &tmp_err);
     if (!result) {
         if (!tmp_err){
+            if (failures->len) {
+                subdoc_error = modulemd_subdocument_info_get_gerror(g_ptr_array_index(failures, 0));
+                if (subdoc_error)
+                {
+                    g_set_error(err, CRE_MODULEMD, CREATEREPO_C_ERROR,
+                                "Error in \"%s\" : %s",
+                                g_path_get_basename(path_to_md),
+                                subdoc_error->message);
+                    return CRE_MODULEMD;
+                }
+            }
+
             g_set_error(err, CRE_MODULEMD, CREATEREPO_C_ERROR,
                         "Unknown error in libmodulemd with %s",
-                        modulemd_metadatum->name);
+                        path_to_md);
         }else{
             g_propagate_error (err, tmp_err);
         }
@@ -541,7 +553,7 @@ cr_metadata_load_xml(cr_Metadata *md,
     intern_hashtable = cr_new_metadata_hashtable();
     result = cr_load_xml_files(intern_hashtable,
                                ml->pri_xml_href,
-                               ml->fil_xml_href,
+                               ml->fex_xml_href ? ml->fex_xml_href : ml->fil_xml_href,
                                ml->oth_xml_href,
                                md->chunk,
                                md->pkglist_ht,
@@ -654,7 +666,8 @@ cr_metadata_load_xml(cr_Metadata *md,
 
 #ifdef WITH_LIBMODULEMD
     if (g_slist_find_custom(ml->additional_metadata, "modules", cr_cmp_metadatum_type)){
-      result = cr_metadata_load_modulemd(md, ml, err);
+      cr_Metadatum *modulemd_metadatum = g_slist_find_custom(ml->additional_metadata, "modules", cr_cmp_metadatum_type)->data;
+      result = cr_metadata_load_modulemd(&(md->moduleindex), modulemd_metadatum->name, err);
     }
 #endif /* WITH_LIBMODULEMD */
 
@@ -686,4 +699,32 @@ cr_metadata_locate_and_load_xml(cr_Metadata *md,
     cr_metadatalocation_free(ml);
 
     return ret;
+}
+
+gchar *
+cr_compress_groupfile(const char *groupfile, const char *dest_dir, cr_CompressionType compression)
+{
+    const char *compression_suffix = cr_compression_suffix(compression);
+    GError *tmp_err = NULL;
+    gchar *compressed_path;
+    cr_CompressionType old_type = cr_detect_compression(groupfile, &tmp_err);
+    if (tmp_err) {
+        compressed_path = g_strconcat(dest_dir, cr_get_filename(groupfile), compression_suffix, NULL);
+        g_debug("Unable to detect compression type of %s, using %s for groupfile.", groupfile, compressed_path);
+        g_clear_error(&tmp_err);
+    } else if (old_type == CR_CW_NO_COMPRESSION) {
+        compressed_path = g_strconcat(dest_dir, cr_get_filename(groupfile), compression_suffix, NULL);
+    } else {
+        // strip compression suffix
+        gchar *tmp_file = g_strndup(groupfile, strlen(groupfile) - strlen(cr_compression_suffix(old_type)));
+        compressed_path = g_strconcat(dest_dir, cr_get_filename(tmp_file), compression_suffix, NULL);
+        g_free(tmp_file);
+    }
+    if (cr_compress_file(groupfile, compressed_path, compression, NULL, 0, &tmp_err) != CRE_OK) {
+        g_critical("Cannot compress file: %s: %s", groupfile,
+                   (tmp_err ? tmp_err->message : "Unknown error"));
+        g_clear_error(&tmp_err);
+        exit(EXIT_FAILURE);
+    }
+    return compressed_path;
 }

@@ -26,6 +26,7 @@ extern "C" {
 
 #include <glib.h>
 #include <string.h>
+#include <gio/gio.h>
 #include <curl/curl.h>
 #include "compression_wrapper.h"
 #include "xml_parser.h"
@@ -115,7 +116,7 @@ static inline int cr_is_primary(const char *filename) {
     if (strstr(filename, "bin/"))
         return 1;
     return 0;
-};
+}
 
 /** Header range
  */
@@ -250,6 +251,15 @@ gboolean cr_better_copy_file(const char *src,
  * @return              cr_Error return code
  */
 int cr_remove_dir(const char *path, GError **err);
+
+/** Move a directory and its contents. Native move is preferred,
+ *  if not supported copy and delete fallback is used.
+ * @param srcDir        A source directory path
+ * @param dstDir        A destination directory path
+ * @param err           GError **
+ * @return              TRUE on success, FALSE otherwise
+ */
+gboolean cr_move_recursive(const char *srcDir, const char *dstDir, GError **err);
 
 /** Normalize path (Path with exactly one trailing '/').
  *@param path           path
@@ -440,7 +450,7 @@ typedef enum {
         preserve the all attributes (if possible) */
 } cr_CpFlags;
 
-/** Recursive copy of directory (works on files as well)
+/** Wrapper for cp
  * @param src           Source (supports wildcards)
  * @param dst           Destination (supports wildcards)
  * @param flags         Flags
@@ -452,6 +462,20 @@ cr_cp(const char *src,
       const char *dst,
       cr_CpFlags flags,
       const char *working_directory,
+      GError **err) __attribute__ ((deprecated ("please use `cr_gio_cp` instead")));
+
+/** Recursive copy of directory (works on files as well)
+ * @param src           Source (supports wildcards)
+ * @param dst           Destination (supports wildcards)
+ * @param flags         Flags
+ * @param cancellable   Can this be cancelled by another thread?
+ * @param err           GError **
+ */
+gboolean
+cr_gio_cp(GFile *src,
+      GFile *dst,
+      GFileCopyFlags flags,
+      GCancellable *cancellable,
       GError **err);
 
 typedef enum {
@@ -523,7 +547,7 @@ cr_nevra_free(cr_NEVRA *nevra);
 /** Are the files identical?
  * Different paths could point to the same file.
  * This functions checks if both paths point to the same file or not.
- * If one of the files doesn't exists, the funcion doesn't fail
+ * If one of the files doesn't exist, the funcion doesn't fail
  * and just put FALSE into "indentical" value and returns.
  * @param fn1           First path
  * @param fn2           Second path

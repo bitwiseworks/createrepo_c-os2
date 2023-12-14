@@ -35,7 +35,7 @@ extern "C" {
 #define XML_BUFFER_SIZE         8192
 #define CONTENT_REALLOC_STEP    256
 
-/* Some notes about XML parsing (primary, filelists, other)
+/* Some notes about XML parsing (primary, filelists[_ext], other)
  * ========================================================
  * - Error during parsing is indicated via cr_ParserData->err member.
  * - User specified callback have to be sanitized! User callbacks
@@ -44,7 +44,7 @@ extern "C" {
  *   of the callback has to set the GError by himself.
  */
 
-/** File types in filelists.xml
+/** File types in filelists[_ext].xml
  */
 typedef enum {
     FILE_FILE,
@@ -88,6 +88,7 @@ typedef struct _cr_ParserData {
         Was the main tag present? E.g.:
         For primary.xml <metadata>
         For filelists.xml <filelists>
+        For filelists-ext.xml <filelists-ext>
         For other.xml <otherdata>
         For repomd.xml <repomd>
         For updateinfo.xml <updates>
@@ -128,6 +129,8 @@ typedef struct _cr_ParserData {
 
     cr_FileType last_file_type; /*!<
         Type of file in a currently parsed element */
+    char *last_digest; /*!<
+        Disgest of the current parsed element */
 
     /* Other related stuff */
 
@@ -223,6 +226,40 @@ cr_xml_parser_generic_from_string(xmlParserCtxtPtr parser,
                                   cr_ParserData *pd,
                                   const char *xml_string,
                                   GError **err);
+
+cr_ParserData *
+primary_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                        void *newpkgcb_data,
+                        cr_XmlParserPkgCb pkgcb,
+                        void *pkgcb_data,
+                        cr_XmlParserWarningCb warningcb,
+                        void *warningcb_data,
+                        int do_files);
+
+cr_ParserData *
+filelists_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                          void *newpkgcb_data,
+                          cr_XmlParserPkgCb pkgcb,
+                          void *pkgcb_data,
+                          cr_XmlParserWarningCb warningcb,
+                          void *warningcb_data);
+
+cr_ParserData *
+other_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                      void *newpkgcb_data,
+                      cr_XmlParserPkgCb pkgcb,
+                      void *pkgcb_data,
+                      cr_XmlParserWarningCb warningcb,
+                      void *warningcb_data);
+
+/** Replace &#38; by real ampersand char from values in attr.
+ * @param attr                   List of attributes
+ * @param allocation_needed      Output bool whether returned attr has to be freed.
+ * @return                       attr with regular '&' instead of "&#38";
+ */
+const xmlChar **unescape_ampersand_from_values(const xmlChar **attr,
+                                               gboolean *allocation_needed);
+
 
 #ifdef __cplusplus
 }

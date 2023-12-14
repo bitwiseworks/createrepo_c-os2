@@ -20,36 +20,41 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <assert.h>
+#include <rpm/rpmstring.h>
 #include "xml_file.h"
 #include <errno.h>
 #include "error.h"
 #include "xml_dump.h"
 #include "compression_wrapper.h"
 #include "xml_dump_internal.h"
+#include "misc.h"
 
-#define ERR_DOMAIN              CREATEREPO_C_ERROR
+#define ERR_DOMAIN               CREATEREPO_C_ERROR
 
-#define XML_HEADER              "<?xml version=\""XML_DOC_VERSION \
-                                "\" encoding=\""XML_ENCODING"\"?>\n"
+#define XML_HEADER               "<?xml version=\""XML_DOC_VERSION \
+                                 "\" encoding=\""XML_ENCODING"\"?>\n"
 
-#define XML_PRIMARY_HEADER      XML_HEADER"<metadata xmlns=\"" \
-                                CR_XML_COMMON_NS"\" xmlns:rpm=\"" \
-                                CR_XML_RPM_NS"\" packages=\"%d\">\n"
-#define XML_FILELISTS_HEADER    XML_HEADER"<filelists xmlns=\"" \
-                                CR_XML_FILELISTS_NS"\" packages=\"%d\">\n"
-#define XML_OTHER_HEADER        XML_HEADER"<otherdata xmlns=\"" \
-                                CR_XML_OTHER_NS"\" packages=\"%d\">\n"
-#define XML_PRESTODELTA_HEADER  XML_HEADER"<prestodelta>\n"
-#define XML_UPDATEINFO_HEADER   XML_HEADER"<updates>\n"
+#define XML_PRIMARY_HEADER       XML_HEADER"<metadata xmlns=\"" \
+                                 CR_XML_COMMON_NS"\" xmlns:rpm=\"" \
+                                 CR_XML_RPM_NS"\" packages=\"%d\">\n"
+#define XML_FILELISTS_HEADER     XML_HEADER"<filelists xmlns=\"" \
+                                 CR_XML_FILELISTS_NS"\" packages=\"%d\">\n"
+#define XML_FILELISTS_EXT_HEADER XML_HEADER"<filelists-ext xmlns=\"" \
+                                 CR_XML_FILELISTS_EXT_NS"\" packages=\"%d\">\n"
+#define XML_OTHER_HEADER         XML_HEADER"<otherdata xmlns=\"" \
+                                 CR_XML_OTHER_NS"\" packages=\"%d\">\n"
+#define XML_PRESTODELTA_HEADER   XML_HEADER"<prestodelta>\n"
+#define XML_UPDATEINFO_HEADER    XML_HEADER"<updates>\n"
 
-#define XML_MAX_HEADER_SIZE     300
+#define XML_MAX_HEADER_SIZE      300
 #define XML_RECOMPRESS_BUFFER_SIZE   8192
 
-#define XML_PRIMARY_FOOTER      "</metadata>"
-#define XML_FILELISTS_FOOTER    "</filelists>"
-#define XML_OTHER_FOOTER        "</otherdata>"
-#define XML_PRESTODELTA_FOOTER  "</prestodelta>"
-#define XML_UPDATEINFO_FOOTER   "</updates>"
+#define XML_PRIMARY_FOOTER       "</metadata>"
+#define XML_FILELISTS_FOOTER     "</filelists>"
+#define XML_FILELISTS_EXT_FOOTER "</filelists-ext>"
+#define XML_OTHER_FOOTER         "</otherdata>"
+#define XML_PRESTODELTA_FOOTER   "</prestodelta>"
+#define XML_UPDATEINFO_FOOTER    "</updates>"
 
 cr_XmlFile *
 cr_xmlfile_sopen(const char *filename,
@@ -131,6 +136,9 @@ cr_xmlfile_write_xml_header(cr_XmlFile *f, GError **err)
     case CR_XMLFILE_FILELISTS:
         xml_header = XML_FILELISTS_HEADER;
         break;
+    case CR_XMLFILE_FILELISTS_EXT:
+        xml_header = XML_FILELISTS_EXT_HEADER;
+        break;
     case CR_XMLFILE_OTHER:
         xml_header = XML_OTHER_HEADER;
         break;
@@ -174,6 +182,9 @@ cr_xmlfile_write_xml_footer(cr_XmlFile *f, GError **err)
         break;
     case CR_XMLFILE_FILELISTS:
         xml_footer = XML_FILELISTS_FOOTER;
+        break;
+    case CR_XMLFILE_FILELISTS_EXT:
+        xml_footer = XML_FILELISTS_EXT_FOOTER;
         break;
     case CR_XMLFILE_OTHER:
         xml_footer = XML_OTHER_FOOTER;
@@ -221,6 +232,9 @@ cr_xmlfile_add_pkg(cr_XmlFile *f, cr_Package *pkg, GError **err)
     case CR_XMLFILE_FILELISTS:
         xml = cr_xml_dump_filelists(pkg, &tmp_err);
         break;
+    case CR_XMLFILE_FILELISTS_EXT:
+        xml = cr_xml_dump_filelists_ext(pkg, &tmp_err);
+        break;
     case CR_XMLFILE_OTHER:
         xml = cr_xml_dump_other(pkg, &tmp_err);
         break;
@@ -234,6 +248,8 @@ cr_xmlfile_add_pkg(cr_XmlFile *f, cr_Package *pkg, GError **err)
     if (tmp_err) {
         int code = tmp_err->code;
         g_propagate_error(err, tmp_err);
+        if (xml)
+            g_free(xml);
         return code;
     }
 
@@ -387,6 +403,7 @@ cr_rewrite_header_package_count(gchar *original_filename,
         g_propagate_prefixed_error(err, tmp_err, "Error encountered while opening for writing:");
         cr_close(original_file, NULL); 
         g_free(tmp_xml_filename);
+        cr_xmlfile_close(new_file, NULL);
         return;
     }
 
@@ -397,11 +414,13 @@ cr_rewrite_header_package_count(gchar *original_filename,
             size_t zck_dict_size = 0;
             if (g_file_get_contents(zck_dict_file, &zck_dict, &zck_dict_size, &tmp_err)){
                 cr_set_dict(new_file->f, zck_dict, zck_dict_size, &tmp_err);
+                g_free(zck_dict);
             } else {
                 g_propagate_prefixed_error(err, tmp_err, "Error encountered setting zck dict:");
                 cr_xmlfile_close(new_file, NULL);
                 cr_close(original_file, NULL);
                 g_free(tmp_xml_filename);
+                g_free(zck_dict);
                 return;
             }
         }
@@ -482,7 +501,7 @@ cr_rewrite_header_package_count(gchar *original_filename,
         return;
     }
 
-    if (g_rename(tmp_xml_filename, original_filename) == -1) {
+    if (!cr_move_recursive(tmp_xml_filename, original_filename, &tmp_err)) {
         g_propagate_prefixed_error(err, tmp_err, "Error encountered while renaming:");
         g_free(tmp_xml_filename);
         return;

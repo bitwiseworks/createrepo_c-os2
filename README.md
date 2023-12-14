@@ -13,7 +13,6 @@ Package build requires - Pkg name in Fedora/Ubuntu:
 * bzip2 (http://bzip.org/) - bzip2-devel/libbz2-dev
 * cmake (http://www.cmake.org/) - cmake/cmake
 * drpm (https://github.com/rpm-software-management/drpm) - drpm-devel/
-* file (http://www.darwinsys.com/file/) - file-devel/libmagic-dev
 * glib2 (http://developer.gnome.org/glib/) - glib2-devel/libglib2.0-dev
 * libcurl (http://curl.haxx.se/libcurl/) - libcurl-devel/libcurl4-openssl-dev
 * libmodulemd (https://github.com/fedora-modularity/libmodulemd/) - libmodulemd-devel/
@@ -25,6 +24,7 @@ Package build requires - Pkg name in Fedora/Ubuntu:
 * xz (http://tukaani.org/xz/) - xz-devel/liblzma-dev
 * zchunk (https://github.com/zchunk/zchunk) - zchunk-devel/
 * zlib (http://www.zlib.net/) - zlib-devel/zlib1g-dev
+* libzstd (http://facebook.github.io/zstd/) - libzstd-devel/libzstd-dev
 * *Documentation:* doxygen (http://doxygen.org/) - doxygen/doxygen
 * *Documentation:* sphinx (http://sphinx-doc.org/) - python3-sphinx/python3-sphinx
 * **Test requires:** check (http://check.sourceforge.net/) - check-devel/check

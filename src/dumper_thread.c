@@ -43,12 +43,6 @@ struct BufferedTask {
     long id;                        // ID of the task
     struct cr_XmlStruct res;        // XML for primary, filelists and other
     cr_Package *pkg;                // Package structure
-    char *location_href;            // location_href path
-    char *location_base;            // location_base path
-    int pkg_from_md;                // If true - package structure if from
-                                    // old metadata and must not be freed!
-                                    // If false - package is from file and
-                                    // it must be freed!
 };
 
 
@@ -60,6 +54,41 @@ buf_task_sort_func(gconstpointer a, gconstpointer b, G_GNUC_UNUSED gpointer data
     if (task_a->id < task_b->id)  return -1;
     if (task_a->id == task_b->id) return 0;
     return 1;
+}
+
+
+static void
+wait_for_incremented_ids(long id, struct UserData *udata)
+{
+    g_mutex_lock(&(udata->mutex_pri));
+    while (udata->id_pri != id)
+        g_cond_wait (&(udata->cond_pri), &(udata->mutex_pri));
+    ++udata->id_pri;
+    g_cond_broadcast(&(udata->cond_pri));
+    g_mutex_unlock(&(udata->mutex_pri));
+
+    g_mutex_lock(&(udata->mutex_fil));
+    while (udata->id_fil != id)
+        g_cond_wait (&(udata->cond_fil), &(udata->mutex_fil));
+    ++udata->id_fil;
+    g_cond_broadcast(&(udata->cond_fil));
+    g_mutex_unlock(&(udata->mutex_fil));
+
+    if (udata->filelists_ext) {
+        g_mutex_lock(&(udata->mutex_fex));
+        while (udata->id_fex != id)
+            g_cond_wait (&(udata->cond_fex), &(udata->mutex_fex));
+        ++udata->id_fex;
+        g_cond_broadcast(&(udata->cond_fex));
+        g_mutex_unlock(&(udata->mutex_fex));
+    }
+
+    g_mutex_lock(&(udata->mutex_oth));
+    while (udata->id_oth != id)
+        g_cond_wait (&(udata->cond_oth), &(udata->mutex_oth));
+    ++udata->id_oth;
+    g_cond_broadcast(&(udata->cond_oth));
+    g_mutex_unlock(&(udata->mutex_oth));
 }
 
 
@@ -166,6 +195,51 @@ write_pkg(long id,
     g_cond_broadcast(&(udata->cond_fil));
     g_mutex_unlock(&(udata->mutex_fil));
 
+    // Write filelists-ext data
+    if (udata->filelists_ext) {
+        g_mutex_lock(&(udata->mutex_fex));
+        while (udata->id_fex != id)
+            g_cond_wait (&(udata->cond_fex), &(udata->mutex_fex));
+        ++udata->id_fex;
+        cr_xmlfile_add_chunk(udata->fex_f, (const char *) res.filelists_ext, &tmp_err);
+        if (tmp_err) {
+            g_critical("Cannot add filelists-ext chunk:\n%s\nError: %s",
+                       res.filelists_ext, tmp_err->message);
+            udata->had_errors = TRUE;
+            g_clear_error(&tmp_err);
+        }
+
+        if (udata->fex_db) {
+            cr_db_add_pkg(udata->fex_db, pkg, &tmp_err);
+            if (tmp_err) {
+                g_critical("Cannot add record of %s (%s) to filelists-ext db: %s",
+                           pkg->name, pkg->pkgId, tmp_err->message);
+                udata->had_errors = TRUE;
+                g_clear_error(&tmp_err);
+            }
+        }
+        if (udata->fex_zck) {
+            if (new_pkg) {
+                cr_end_chunk(udata->fex_zck->f, &tmp_err);
+                if (tmp_err) {
+                    g_critical("Unable to end filelists-ext zchunk: %s", tmp_err->message);
+                    udata->had_errors = TRUE;
+                    g_clear_error(&tmp_err);
+                }
+            }
+            cr_xmlfile_add_chunk(udata->fex_zck, (const char *) res.filelists_ext, &tmp_err);
+            if (tmp_err) {
+                g_critical("Cannot add filelists-ext zchunk:\n%s\nError: %s",
+                           res.filelists_ext, tmp_err->message);
+                udata->had_errors = TRUE;
+                g_clear_error(&tmp_err);
+            }
+        }
+
+        g_cond_broadcast(&(udata->cond_fex));
+        g_mutex_unlock(&(udata->mutex_fex));
+    }
+
     // Write other data
     g_mutex_lock(&(udata->mutex_oth));
     while (udata->id_oth != id)
@@ -209,6 +283,62 @@ write_pkg(long id,
     g_mutex_unlock(&(udata->mutex_oth));
 }
 
+
+struct DelayedTask {
+    cr_Package *pkg;
+};
+
+
+void
+cr_delayed_dump_set(gpointer user_data)
+{
+    struct UserData *udata = (struct UserData *) user_data;
+    udata->delayed_write = g_array_sized_new(TRUE, TRUE,
+                                             sizeof(struct DelayedTask),
+                                             udata->task_count);
+}
+
+
+void
+cr_delayed_dump_run(gpointer user_data)
+{
+    GError *tmp_err = NULL;
+    struct UserData *udata = (struct UserData *) user_data;
+    long int stop = udata->task_count;
+    g_debug("Performing the delayed metadata dump");
+    for (int id = 0; id < stop; id++) {
+        struct DelayedTask dtask = g_array_index(udata->delayed_write,
+                                                 struct DelayedTask, id);
+        if (!dtask.pkg || dtask.pkg->skip_dump) {
+            // invalid || explicitly skipped task
+            wait_for_incremented_ids(id, udata);
+            continue;
+        }
+
+        struct cr_XmlStruct res;
+        if (udata->filelists_ext) {
+            res = cr_xml_dump_ext(dtask.pkg,  &tmp_err);
+        } else {
+            res = cr_xml_dump(dtask.pkg, &tmp_err);
+        }
+        if (tmp_err) {
+            g_critical("Cannot dump XML for %s (%s): %s",
+                       dtask.pkg->name, dtask.pkg->pkgId, tmp_err->message);
+            udata->had_errors = TRUE;
+            g_clear_error(&tmp_err);
+        }
+        else {
+            write_pkg(id, res, dtask.pkg, udata);
+        }
+
+        g_free(res.primary);
+        g_free(res.filelists);
+        g_free(res.filelists_ext);
+        g_free(res.other);
+    }
+}
+
+
 static char *
 get_checksum(const char *filename,
              cr_ChecksumType type,
@@ -222,7 +352,6 @@ get_checksum(const char *filename,
 
     if (cachedir) {
         // Prepare cache fn
-        char *key;
         cr_ChecksumCtx *ctx = cr_checksum_new(type, err);
         if (!ctx) return NULL;
 
@@ -233,14 +362,14 @@ get_checksum(const char *filename,
         if (pkg->hdrid)
             cr_checksum_update(ctx, pkg->hdrid, strlen(pkg->hdrid), NULL);
 
-        key = cr_checksum_final(ctx, err);
+        gchar *key = cr_checksum_final(ctx, err);
         if (!key) return NULL;
 
         cachefn = g_strdup_printf("%s%s-%s-%"G_GINT64_FORMAT"-%"G_GINT64_FORMAT,
                                   cachedir,
                                   cr_get_filename(pkg->location_href),
                                   key, pkg->size_installed, pkg->time_file);
-        free(key);
+        g_free(key);
 
         // Try to load checksum
 #ifndef __OS2__
@@ -283,8 +412,10 @@ get_checksum(const char *filename,
 
         write(fd, checksum, strlen(checksum));
         close(fd);
-        if (g_rename(template, cachefn) == -1)
+        if (!cr_move_recursive(template, cachefn, &tmp_err)) {
+            g_propagate_prefixed_error(err, tmp_err, "Error while renaming: ");
             g_remove(template);
+        }
         g_free(template);
     }
 
@@ -346,10 +477,11 @@ load_rpm(const char *fullpath,
     if (!stat_buf) {
         struct stat stat_buf_own;
         if (stat(fullpath, &stat_buf_own) == -1) {
+            const gchar * stat_error = g_strerror(errno);
             g_warning("%s: stat(%s) error (%s)", __func__,
-                      fullpath, g_strerror(errno));
+                      fullpath, stat_error);
             g_set_error(err,  CREATEREPO_C_ERROR, CRE_IO, "stat(%s) failed: %s",
-                        fullpath, g_strerror(errno));
+                        fullpath, stat_error);
             goto errexit;
         }
         pkg->time_file    = stat_buf_own.st_mtime;
@@ -394,13 +526,25 @@ cr_dumper_thread(gpointer data, gpointer user_data)
     GError *tmp_err = NULL;
     gboolean old_used = FALSE;  // To use old metadata?
     cr_Package *md  = NULL;     // Package from loaded MetaData
-    cr_Package *pkg = NULL;     // Package from file
+    cr_Package *pkg = NULL;     // Package we work with
     struct stat stat_buf;       // Struct with info from stat() on file
     struct cr_XmlStruct res;    // Structure for generated XML
     cr_HeaderReadingFlags hdrrflags = CR_HDRR_NONE;
 
     struct UserData *udata = (struct UserData *) user_data;
     struct PoolTask *task  = (struct PoolTask *) data;
+
+    struct DelayedTask *dtask = NULL;
+    if (udata->delayed_write) {
+        // even if we might found out that this is an invalid package,
+        // we have to allocate a delayed task, we have to assure that
+        // len(delayed_write) == udata->task_count and that all items
+        // are processed in the delayed run.
+        dtask = &g_array_index(udata->delayed_write,
+                               struct DelayedTask,
+                               task->id);
+        dtask->pkg = NULL;
+    }
 
     // get location_href without leading part of path (path to repo)
     // including '/' char
@@ -474,14 +618,22 @@ cr_dumper_thread(gpointer data, gpointer user_data)
             }
 
             if (old_used) {
+                // CR_PACKAGE_SINGLE_CHUNK used with the preloaded (old)
+                // metadata.  Create a new per-package chunk.
+                assert (!md->chunk);
+                md->chunk = g_string_chunk_new(1024);
+                md->loadingflags &= ~CR_PACKAGE_SINGLE_CHUNK;
+
                 // We have usable old data, but we have to set proper locations
-                // WARNING! This two lines destructively modifies content of
-                // packages in old metadata.
-                md->location_href = location_href;
-                md->location_base = location_base;
-                // ^^^ The location_base not location_href are properly saved
-                // into pkg chunk this is intentional as after the metadata
-                // are written (dumped) none should use them again.
+                // WARNING! location_href is overidden
+                // location_base is kept by default, unless specified differently
+                //
+                md->location_href = cr_safe_string_chunk_insert(md->chunk, location_href);
+                if (location_base)
+                    md->location_base = cr_safe_string_chunk_insert(md->chunk, location_base);
+                // ^^^ The location_base and location_href create a new data
+                // chunk, even though the rest of the metadata is stored in the
+                // global chunk (shared with all packages).
             }
         }
     }
@@ -503,15 +655,6 @@ cr_dumper_thread(gpointer data, gpointer user_data)
             goto task_cleanup;
         }
 
-        res = cr_xml_dump(pkg, &tmp_err);
-        if (tmp_err) {
-            g_critical("Cannot dump XML for %s (%s): %s",
-                       pkg->name, pkg->pkgId, tmp_err->message);
-            udata->had_errors = TRUE;
-            g_clear_error(&tmp_err);
-            goto task_cleanup;
-        }
-
         if (udata->output_pkg_list){
             g_mutex_lock(&(udata->mutex_output_pkg_list));
             fprintf(udata->output_pkg_list, "%s\n", pkg->location_href);
@@ -520,14 +663,6 @@ cr_dumper_thread(gpointer data, gpointer user_data)
     } else {
         // Just gen XML from old loaded metadata
         pkg = md;
-        res = cr_xml_dump(md, &tmp_err);
-        if (tmp_err) {
-            g_critical("Cannot dump XML for %s (%s): %s",
-                       md->name, md->pkgId, tmp_err->message);
-            udata->had_errors = TRUE;
-            g_clear_error(&tmp_err);
-            goto task_cleanup;
-        }
     }
 
 #ifdef CR_DELTA_RPM_SUPPORT
@@ -553,6 +688,53 @@ cr_dumper_thread(gpointer data, gpointer user_data)
     }
 #endif
 
+    // Allow checking that the same package (NEVRA) isn't present multiple times in the metadata
+    // Keep a hashtable of NEVRA mapped to an array-list of location_href values
+    g_mutex_lock(&(udata->mutex_nevra_table));
+    gchar *nevra = cr_package_nevra(pkg);
+    GArray *pkg_locations = g_hash_table_lookup(udata->nevra_table, nevra);
+    if (!pkg_locations) {
+        pkg_locations = g_array_new(FALSE, TRUE, sizeof(struct DuplicateLocation));
+        g_hash_table_insert(udata->nevra_table, nevra, pkg_locations);
+    } else {
+        g_free(nevra);
+    }
+
+    struct DuplicateLocation location;
+    location.location = g_strdup(pkg->location_href);
+    // location (udate->nevra_table) gathers all handled packages:
+    //  - new cr_Packages produced by processing rpm files
+    //  - old cr_Packages transferred from parsed old metadata (during --update)
+    // Therefore it takes ownership of them, it is resposible for freeing them.
+    location.pkg = pkg;
+    g_array_append_val(pkg_locations, location);
+    g_mutex_unlock(&(udata->mutex_nevra_table));
+
+    if (dtask) {
+        dtask->pkg = pkg;
+        g_free(task->full_path);
+        g_free(task->filename);
+        g_free(task->path);
+        g_free(task);
+        return;
+    }
+
+    // Pre-calculate the XML data aside any critical section, and early enough
+    // so we can put it into the buffer (so buffered single-threaded write later
+    // is faster).
+    if (udata->filelists_ext) {
+        res = cr_xml_dump_ext(pkg,  &tmp_err);
+    } else {
+        res = cr_xml_dump(pkg, &tmp_err);
+    }
+    if (tmp_err) {
+        g_critical("Cannot dump XML for %s (%s): %s",
+                   pkg->name, pkg->pkgId, tmp_err->message);
+        udata->had_errors = TRUE;
+        g_clear_error(&tmp_err);
+        goto task_cleanup;
+    }
+
     // Buffering stuff
     g_mutex_lock(&(udata->mutex_buffer));
 
@@ -566,22 +748,10 @@ cr_dumper_thread(gpointer data, gpointer user_data)
         //  * this isn't the last task
         // Then: save the task to the buffer
 
-        struct BufferedTask *buf_task = malloc(sizeof(struct BufferedTask));
+        struct BufferedTask *buf_task = g_malloc0(sizeof(struct BufferedTask));
         buf_task->id  = task->id;
         buf_task->res = res;
         buf_task->pkg = pkg;
-        buf_task->location_href = NULL;
-        buf_task->location_base = NULL;
-        buf_task->pkg_from_md = (pkg == md) ? 1 : 0;
-
-        if (pkg == md) {
-            // We MUST store locations for reused packages who goes to the buffer
-            buf_task->location_href = g_strdup(location_href);
-            buf_task->pkg->location_href = buf_task->location_href;
-
-            buf_task->location_base = g_strdup(location_base);
-            buf_task->pkg->location_base = buf_task->location_base;
-        }
 
         g_queue_insert_sorted(udata->buffer, buf_task, buf_task_sort_func, NULL);
         g_mutex_unlock(&(udata->mutex_buffer));
@@ -599,35 +769,16 @@ cr_dumper_thread(gpointer data, gpointer user_data)
     // Dump XML and SQLite
     write_pkg(task->id, res, pkg, udata);
 
-    // Clean up
-    cr_package_free(pkg);
     g_free(res.primary);
     g_free(res.filelists);
+    g_free(res.filelists_ext);
     g_free(res.other);
 
 task_cleanup:
-    if (udata->id_pri <= task->id) {
+    // Clean up
+    if (!dtask && udata->id_pri <= task->id) {
         // An error was encountered and we have to wait to increment counters
-        g_mutex_lock(&(udata->mutex_pri));
-        while (udata->id_pri != task->id)
-            g_cond_wait (&(udata->cond_pri), &(udata->mutex_pri));
-        ++udata->id_pri;
-        g_cond_broadcast(&(udata->cond_pri));
-        g_mutex_unlock(&(udata->mutex_pri));
-
-        g_mutex_lock(&(udata->mutex_fil));
-        while (udata->id_fil != task->id)
-            g_cond_wait (&(udata->cond_fil), &(udata->mutex_fil));
-        ++udata->id_fil;
-        g_cond_broadcast(&(udata->cond_fil));
-        g_mutex_unlock(&(udata->mutex_fil));
-
-        g_mutex_lock(&(udata->mutex_oth));
-        while (udata->id_oth != task->id)
-            g_cond_wait (&(udata->cond_oth), &(udata->mutex_oth));
-        ++udata->id_oth;
-        g_cond_broadcast(&(udata->cond_oth));
-        g_mutex_unlock(&(udata->mutex_oth));
+        wait_for_incremented_ids(task->id, udata);
     }
 
     g_free(task->full_path);
@@ -646,12 +797,10 @@ task_cleanup:
             // Dump XML and SQLite
             write_pkg(buf_task->id, buf_task->res, buf_task->pkg, udata);
             // Clean up
-            cr_package_free(buf_task->pkg);
             g_free(buf_task->res.primary);
             g_free(buf_task->res.filelists);
+            g_free(buf_task->res.filelists_ext);
             g_free(buf_task->res.other);
-            g_free(buf_task->location_href);
-            g_free(buf_task->location_base);
             g_free(buf_task);
         } else {
             g_mutex_unlock(&(udata->mutex_buffer));

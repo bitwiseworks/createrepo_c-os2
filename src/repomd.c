@@ -38,7 +38,6 @@
 
 #define ERR_DOMAIN                  CREATEREPO_C_ERROR
 #define LOCATION_HREF_PREFIX        "repodata/"
-#define DEFAULT_DATABASE_VERSION    10
 #define BUFFER_SIZE                 8192
 
 cr_DistroTag *
@@ -126,7 +125,7 @@ cr_get_compressed_content_stat(const char *filename,
 
     if (!g_file_test(filename, G_FILE_TEST_IS_REGULAR)) {
         g_set_error(err, ERR_DOMAIN, CRE_NOFILE,
-                    "File %s doesn't exists or not a regular file", filename);
+                    "File %s doesn't exist or not a regular file", filename);
         return NULL;
     }
 
@@ -140,6 +139,7 @@ cr_get_compressed_content_stat(const char *filename,
                                read_stat,
                                &tmp_err);
     if (!cwfile) {
+        cr_contentstat_free(read_stat, NULL);
         g_propagate_prefixed_error(err, tmp_err,
                                    "Cannot open a file %s: ", filename);
         return NULL;
@@ -151,6 +151,7 @@ cr_get_compressed_content_stat(const char *filename,
         g_critical("%s: g_checksum_new() failed", __func__);
         g_propagate_prefixed_error(err, tmp_err,
                 "Error while checksum calculation: ");
+        cr_close(cwfile, NULL);
         return NULL;
     }
 
@@ -172,8 +173,11 @@ cr_get_compressed_content_stat(const char *filename,
         size += readed;
     } while (readed == BUFFER_SIZE);
 
-    if (readed == CR_CW_ERR)
+    if (readed == CR_CW_ERR) {
+        cr_close(cwfile, NULL);
+        g_free(checksum);
         return NULL;
+    }
 
     // Create result structure
 
@@ -193,6 +197,7 @@ cr_get_compressed_content_stat(const char *filename,
     } else {
         g_set_error(err, ERR_DOMAIN, CRE_MEMORY,
                     "Cannot allocate memory");
+        g_free(checksum);
     }
 
     cr_close(cwfile, NULL);
@@ -226,10 +231,10 @@ cr_repomd_record_fill(cr_RepomdRecord *md,
     checksum_t = checksum_type;
 
     if (!g_file_test(path, G_FILE_TEST_IS_REGULAR)) {
-        // File doesn't exists
-        g_warning("%s: File %s doesn't exists", __func__, path);
+        // File doesn't exist
+        g_warning("%s: File %s doesn't exist", __func__, path);
         g_set_error(err, ERR_DOMAIN, CRE_NOFILE,
-                    "File %s doesn't exists or not a regular file", path);
+                    "File %s doesn't exist or not a regular file", path);
         return CRE_NOFILE;
     }
 
@@ -275,6 +280,7 @@ cr_repomd_record_fill(cr_RepomdRecord *md,
                 g_propagate_prefixed_error(err, tmp_err,
                     "Error while computing stat of compressed content of %s:",
                     path);
+                cr_contentstat_free(open_stat, NULL);
                 return code;
             }
             md->checksum_open_type = g_string_chunk_insert(md->chunk, checksum_str);
@@ -323,11 +329,6 @@ cr_repomd_record_fill(cr_RepomdRecord *md,
         }
     }
 
-    // Set db version
-
-    if (!md->db_ver)
-        md->db_ver = DEFAULT_DATABASE_VERSION;
-
     return CRE_OK;
 }
 
@@ -369,10 +370,10 @@ cr_repomd_record_compress_and_fill(cr_RepomdRecord *record,
     }
 
     if (!g_file_test(record->location_real, G_FILE_TEST_IS_REGULAR)) {
-        // File doesn't exists
-        g_warning("%s: File %s doesn't exists", __func__, record->location_real);
+        // File doesn't exist
+        g_warning("%s: File %s doesn't exist", __func__, record->location_real);
         g_set_error(err, ERR_DOMAIN, CRE_NOFILE,
-                    "File %s doesn't exists or not a regular file",
+                    "File %s doesn't exist or not a regular file",
                     record->location_real);
         return CRE_NOFILE;;
     }
@@ -424,7 +425,7 @@ cr_repomd_record_compress_and_fill(cr_RepomdRecord *record,
             dict_base = g_strndup(cpath, strlen(cpath)-4);
         else
             dict_base = g_strdup(cpath);
-        file_basename = g_path_get_basename(dict_base); 
+        file_basename = g_path_get_basename(dict_base);
         _cleanup_free_ gchar *dict_file = cr_get_dict_file(zck_dict_dir, file_basename);
         /* Read dictionary from file */
         if (dict_file && !g_file_get_contents(dict_file, &dict,
@@ -549,8 +550,8 @@ cr_repomd_record_compress_and_fill(cr_RepomdRecord *record,
 
     crecord->checksum = g_string_chunk_insert(crecord->chunk, cchecksum);
     crecord->checksum_type = g_string_chunk_insert(crecord->chunk, checksum_str);
-    crecord->checksum_open = g_string_chunk_insert(record->chunk, checksum);
-    crecord->checksum_open_type = g_string_chunk_insert(record->chunk, checksum_str);
+    crecord->checksum_open = g_string_chunk_insert(crecord->chunk, checksum);
+    crecord->checksum_open_type = g_string_chunk_insert(crecord->chunk, checksum_str);
     if (hdr_checksum_str) {
         crecord->checksum_header = g_string_chunk_insert(crecord->chunk, hdrchecksum);
         crecord->checksum_header_type = g_string_chunk_insert(crecord->chunk, hdr_checksum_str);
@@ -957,4 +958,144 @@ cr_repomd_sort_records(cr_Repomd *repomd)
         return;
 
     repomd->records = g_slist_sort(repomd->records, record_cmp);
+}
+
+
+gboolean cr_repomd_compare(cr_Repomd *repomd1, cr_Repomd *repomd2)
+{
+    if (!repomd1 || !repomd2) {
+        return FALSE;
+    }
+
+    // We don't want to compare revision (repomd1->revision), when the user
+    // doesn't specify any it is automatically filled with epoch timestamp,
+    // those would differ every time.
+
+    if (g_strcmp0(repomd1->contenthash, repomd2->contenthash)) {
+        return FALSE;
+    }
+    if (g_strcmp0(repomd1->contenthash_type, repomd2->contenthash_type)) {
+        return FALSE;
+    }
+
+    if (g_slist_length(repomd1->repo_tags) != g_slist_length(repomd2->repo_tags)) {
+        return FALSE;
+    }
+    gboolean found = FALSE;
+    for (GSList *elem1 = repomd1->repo_tags; elem1; elem1 = g_slist_next(elem1)) {
+        found = FALSE;
+        gchar *repo_tag1 = elem1->data;
+        for (GSList *elem2 = repomd2->repo_tags; elem2; elem2 = g_slist_next(elem2)) {
+            gchar *repo_tag2 = elem2->data;
+            if (!g_strcmp0(repo_tag1, repo_tag2)) {
+                found = TRUE;
+                break;
+            }
+        }
+
+        if (!found) {
+            return FALSE;
+        }
+    }
+
+    if (g_slist_length(repomd1->content_tags) != g_slist_length(repomd2->content_tags)) {
+        return FALSE;
+    }
+    for (GSList *elem1 = repomd1->content_tags; elem1; elem1 = g_slist_next(elem1)) {
+        found = FALSE;
+        gchar *content_tag1 = elem1->data;
+        for (GSList *elem2 = repomd2->content_tags; elem2; elem2 = g_slist_next(elem2)) {
+            gchar *content_tag2 = elem2->data;
+            if (!g_strcmp0(content_tag1, content_tag2)) {
+                found = TRUE;
+                break;
+            }
+        }
+
+        if (!found) {
+            return FALSE;
+        }
+    }
+
+    if (g_slist_length(repomd1->distro_tags) != g_slist_length(repomd2->distro_tags)) {
+        return FALSE;
+    }
+    for (GSList *elem1 = repomd1->distro_tags; elem1; elem1 = g_slist_next(elem1)) {
+        cr_DistroTag *distro_tag1 = elem1->data;
+        found = FALSE;
+        for (GSList *elem2 = repomd2->distro_tags; elem2; elem2 = g_slist_next(elem2)) {
+            cr_DistroTag *distro_tag2 = elem2->data;
+            if (!g_strcmp0(distro_tag1->cpeid, distro_tag2->cpeid) && !g_strcmp0(distro_tag1->val, distro_tag2->val)) {
+                found = TRUE;
+                break;
+            }
+        }
+
+        if (!found) {
+            return FALSE;
+        }
+    }
+
+    if (g_slist_length(repomd1->records) != g_slist_length(repomd2->records)) {
+        return FALSE;
+    }
+    for (GSList *elem1 = repomd1->records; elem1; elem1 = g_slist_next(elem1)) {
+        found = FALSE;
+        cr_RepomdRecord *record1 = elem1->data;
+        for (GSList *elem2 = repomd2->records; elem2; elem2 = g_slist_next(elem2)) {
+            cr_RepomdRecord *record2 = elem2->data;
+            if (g_strcmp0(record1->type, record2->type)) {
+                continue;
+            }
+            if (g_strcmp0(record1->location_href, record2->location_href)) {
+                continue;
+            }
+            if (g_strcmp0(record1->location_base, record2->location_base)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum, record2->checksum)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum_type, record2->checksum_type)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum_open, record2->checksum_open)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum_open_type, record2->checksum_open_type)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum_header, record2->checksum_header)) {
+                continue;
+            }
+            if (g_strcmp0(record1->checksum_header_type, record2->checksum_header_type)) {
+                continue;
+            }
+
+            // We don't want to compare timestamps (record1->timestamp)
+            // or real location (record1->location_real)
+
+            if (record1->size != record2->size) {
+                continue;
+            }
+            if (record1->size_open != record2->size_open) {
+                continue;
+            }
+            if (record1->size_header != record2->size_header) {
+                continue;
+            }
+            if (record1->db_ver != record2->db_ver) {
+                continue;
+            }
+
+            found = TRUE;
+            break;
+        }
+
+        if (!found) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
 }

@@ -164,9 +164,9 @@ package_str(_PackageObject *self)
     if (check_PackageStatus(self))
         return NULL;
     if (self->package) {
-        char *nevra = cr_package_nvra(self->package);
+        gchar *nevra = cr_package_nvra(self->package);
         ret = PyUnicode_FromString(nevra);
-        free(nevra);
+        g_free(nevra);
     } else {
         ret = PyUnicode_FromString("-");
     }
@@ -185,9 +185,9 @@ nvra(_PackageObject *self, G_GNUC_UNUSED void *nothing)
     PyObject *pystr;
     if (check_PackageStatus(self))
         return NULL;
-    char *nvra = cr_package_nvra(self->package);
+    gchar *nvra = cr_package_nvra(self->package);
     pystr = PyUnicodeOrNone_FromString(nvra);
-    free(nvra);
+    g_free(nvra);
     return pystr;
 }
 
@@ -201,9 +201,9 @@ nevra(_PackageObject *self, G_GNUC_UNUSED void *nothing)
     PyObject *pystr;
     if (check_PackageStatus(self))
         return NULL;
-    char *nevra = cr_package_nevra(self->package);
+    gchar *nevra = cr_package_nevra(self->package);
     pystr = PyUnicodeOrNone_FromString(nevra);
-    free(nevra);
+    g_free(nevra);
     return pystr;
 }
 
@@ -431,8 +431,9 @@ CheckPyDependency(PyObject *dep)
 static int
 CheckPyPackageFile(PyObject *dep)
 {
-    if (!PyTuple_Check(dep) || PyTuple_Size(dep) != 3) {
-        PyErr_SetString(PyExc_TypeError, "Element of list has to be a tuple with 3 items.");
+    // The fourth element (file checksum) is optional since it is present only in filelists-ext
+    if (!PyTuple_Check(dep) || (PyTuple_Size(dep) != 4 && PyTuple_Size(dep) != 3)) {
+        PyErr_SetString(PyExc_TypeError, "Element of list has to be a tuple with 3 or 4 items.");
         return 1;
     }
     return 0;
@@ -548,6 +549,8 @@ static PyGetSetDef package_getsetters[] = {
         "Base location of this package", OFFSET(location_base)},
     {"checksum_type",    (getter)get_str, (setter)set_str,
         "Type of checksum", OFFSET(checksum_type)},
+    {"files_checksum_type",    (getter)get_str, (setter)set_str,
+        "Type of checksum for files", OFFSET(files_checksum_type)},
     {"requires",         (getter)get_list, (setter)set_list,
         "Capabilities the package requires", &(list_convertors[0])},
     {"provides",         (getter)get_list, (setter)set_list,
@@ -579,7 +582,7 @@ PyTypeObject Package_Type = {
     .tp_basicsize = sizeof(_PackageObject),
     .tp_dealloc = (destructor) package_dealloc,
     .tp_repr = (reprfunc) package_repr,
-    .tp_str = (reprfunc)package_str,
+    .tp_str = (reprfunc) package_str,
     .tp_flags = Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE,
     .tp_doc = package_init__doc__,
     .tp_iter = PyObject_SelfIter,

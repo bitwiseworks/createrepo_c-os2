@@ -132,6 +132,9 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         return;
     }
 
+    gboolean free_attr = FALSE;
+    attr = unescape_ampersand_from_values(attr, &free_attr);
+
     // Update parser data
     pd->state      = sw->to;
     pd->docontent  = sw->docontent;
@@ -394,6 +397,10 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         package->relogin_suggested = TRUE;
         break;
     }
+
+    if (free_attr) {
+        g_strfreev((char **)attr);
+    }
 }
 
 static void
@@ -620,7 +627,6 @@ cr_xml_parse_updateinfo(const char *path,
     // Clean up
 
     cr_xml_parser_data_free(pd);
-    xmlFreeParserCtxt(parser);
 
     return ret;
 }

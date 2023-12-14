@@ -35,8 +35,10 @@
 typedef enum {
     STATE_START,
     STATE_FILELISTS,
+    STATE_FILELISTS_EXT,
     STATE_PACKAGE,
     STATE_VERSION,
+    STATE_CHECKSUM,
     STATE_FILE,
     NUMSTATES,
 } cr_FilState;
@@ -47,11 +49,14 @@ typedef enum {
  * has a "file" element listed first, because it is more frequent
  * than a "version" element). */
 static cr_StatesSwitch stateswitches[] = {
-    { STATE_START,      "filelists",    STATE_FILELISTS,    0 },
-    { STATE_FILELISTS,  "package",      STATE_PACKAGE,      0 },
-    { STATE_PACKAGE,    "file",         STATE_FILE,         1 },
-    { STATE_PACKAGE,    "version",      STATE_VERSION,      0 },
-    { NUMSTATES,        NULL,           NUMSTATES,          0 },
+    { STATE_START,         "filelists",     STATE_FILELISTS,     0 },
+    { STATE_START,         "filelists-ext", STATE_FILELISTS_EXT, 0 },
+    { STATE_FILELISTS,     "package",       STATE_PACKAGE,       0 },
+    { STATE_FILELISTS_EXT, "package",       STATE_PACKAGE,       0 },
+    { STATE_PACKAGE,       "file",          STATE_FILE,          1 },
+    { STATE_PACKAGE,       "version",       STATE_VERSION,       0 },
+    { STATE_PACKAGE,       "checksum",      STATE_CHECKSUM,      0 },
+    { NUMSTATES,           NULL,            NUMSTATES,           0 },
 };
 
 static void XMLCALL
@@ -76,7 +81,8 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         return;
     }
 
-    if (!pd->pkg && pd->state != STATE_FILELISTS && pd->state != STATE_START)
+    if (!pd->pkg && pd->state != STATE_FILELISTS && pd->state != STATE_FILELISTS_EXT
+        && pd->state != STATE_START)
         return;  // Do not parse current package tag and its content
 
     // Find current state by its name
@@ -89,6 +95,9 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
                               "Unknown element \"%s\"", element);
         return;
     }
+
+    gboolean free_attr = FALSE;
+    attr = unescape_ampersand_from_values(attr, &free_attr);
 
     // Update parser data
     pd->state      = sw->to;
@@ -104,6 +113,7 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
         break;
 
     case STATE_FILELISTS:
+    case STATE_FILELISTS_EXT:
         pd->main_tag_found = TRUE;
         break;
 
@@ -178,6 +188,14 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
                                             cr_find_attr("rel", attr));
         break;
 
+    case STATE_CHECKSUM:
+        assert(pd->pkg);
+
+        if (!pd->pkg->files_checksum_type)
+            pd->pkg->files_checksum_type = cr_safe_string_chunk_insert(pd->pkg->chunk,
+                                                           cr_find_attr("type", attr));
+        break;
+
     case STATE_FILE:
         assert(pd->pkg);
 
@@ -192,10 +210,18 @@ cr_start_handler(void *pdata, const xmlChar *element, const xmlChar **attr)
                 cr_xml_parser_warning(pd, CR_XML_WARNING_UNKNOWNVAL,
                                       "Unknown file type \"%s\"", val);
         }
+
+        val = cr_find_attr("cpeid", attr);
+        if (val)
+            pd->last_digest = g_strdup(val);
         break;
 
     default:
         break;
+    }
+
+    if (free_attr) {
+        g_strfreev((char **)attr);
     }
 }
 
@@ -223,7 +249,9 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
     switch (state) {
     case STATE_START:
     case STATE_FILELISTS:
+    case STATE_FILELISTS_EXT:
     case STATE_VERSION:
+    case STATE_CHECKSUM:
         break;
 
     case STATE_PACKAGE:
@@ -259,6 +287,12 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
         cr_PackageFile *pkg_file = cr_package_file_new();
         pkg_file->name = cr_safe_string_chunk_insert(pd->pkg->chunk,
                                                 cr_get_filename(pd->content));
+        if (!pkg_file->name) {
+            g_set_error(&pd->err, ERR_DOMAIN, ERR_CODE_XML,
+                        "Invalid <file> element: %s", pd->content);
+            g_free(pkg_file);
+            break;
+        }
         pd->content[pd->lcontent - strlen(pkg_file->name)] = '\0';
         pkg_file->path = cr_safe_string_chunk_insert_const(pd->pkg->chunk,
                                                            pd->content);
@@ -269,6 +303,12 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
             default: assert(0);  // Should not happend
         }
 
+	pkg_file->digest = cr_safe_string_chunk_insert(pd->pkg->chunk, pd->last_digest);
+        if (pd->last_digest) {
+            g_free(pd->last_digest);
+            pd->last_digest = NULL;
+        }
+
         pd->pkg->files = g_slist_prepend(pd->pkg->files, pkg_file);
         break;
     }
@@ -276,6 +316,47 @@ cr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
     default:
         break;
     }
+}
+
+cr_ParserData *
+filelists_parser_data_new(cr_XmlParserNewPkgCb newpkgcb,
+                          void *newpkgcb_data,
+                          cr_XmlParserPkgCb pkgcb,
+                          void *pkgcb_data,
+                          cr_XmlParserWarningCb warningcb,
+                          void *warningcb_data)
+{
+    cr_ParserData *pd;
+
+    assert(newpkgcb || pkgcb);
+
+    if (!newpkgcb)  // Use default newpkgcb
+        newpkgcb = cr_newpkgcb;
+
+    // Init
+    xmlSAXHandler sax;
+    memset(&sax, 0, sizeof(sax));
+    sax.startElement = cr_start_handler;
+    sax.endElement = cr_end_handler;
+    sax.characters = cr_char_handler;
+
+    pd = cr_xml_parser_data(NUMSTATES);
+
+    pd->parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
+    pd->state = STATE_START;
+    pd->newpkgcb_data = newpkgcb_data;
+    pd->newpkgcb = newpkgcb;
+    pd->pkgcb_data = pkgcb_data;
+    pd->pkgcb = pkgcb;
+    pd->warningcb = warningcb;
+    pd->warningcb_data = warningcb_data;
+    for (cr_StatesSwitch *sw = stateswitches; sw->from != NUMSTATES; sw++) {
+        if (!pd->swtab[sw->from])
+            pd->swtab[sw->from] = sw;
+        pd->sbtab[sw->to] = sw->from;
+    }
+
+    return pd;
 }
 
 int
@@ -290,45 +371,16 @@ cr_xml_parse_filelists_internal(const char *target,
                                 GError **err)
 {
     int ret = CRE_OK;
-    cr_ParserData *pd;
     GError *tmp_err = NULL;
 
     assert(target);
-    assert(newpkgcb || pkgcb);
     assert(!err || *err == NULL);
 
-    if (!newpkgcb)  // Use default newpkgcb
-        newpkgcb = cr_newpkgcb;
-
-    // Init
-    xmlSAXHandler sax;
-    memset(&sax, 0, sizeof(sax));
-    sax.startElement = cr_start_handler;
-    sax.endElement = cr_end_handler;
-    sax.characters = cr_char_handler;
-
-    pd = cr_xml_parser_data(NUMSTATES);
-
-    xmlParserCtxtPtr parser;
-    parser = xmlCreatePushParserCtxt(&sax, pd, NULL, 0, NULL);
-
-    pd->parser = parser;
-    pd->state = STATE_START;
-    pd->newpkgcb_data = newpkgcb_data;
-    pd->newpkgcb = newpkgcb;
-    pd->pkgcb_data = pkgcb_data;
-    pd->pkgcb = pkgcb;
-    pd->warningcb = warningcb;
-    pd->warningcb_data = warningcb_data;
-    for (cr_StatesSwitch *sw = stateswitches; sw->from != NUMSTATES; sw++) {
-        if (!pd->swtab[sw->from])
-            pd->swtab[sw->from] = sw;
-        pd->sbtab[sw->to] = sw->from;
-    }
+    cr_ParserData *pd;
+    pd = filelists_parser_data_new(newpkgcb, newpkgcb_data, pkgcb, pkgcb_data, warningcb, warningcb_data);
 
     // Parsing
-
-    ret = parser_func(parser, pd, target, &tmp_err);
+    ret = parser_func(pd->parser, pd, target, &tmp_err);
 
     if (tmp_err)
         g_propagate_error(err, tmp_err);
@@ -354,7 +406,6 @@ cr_xml_parse_filelists_internal(const char *target,
     }
 
     cr_xml_parser_data_free(pd);
-    xmlFreeParserCtxt(parser);
 
     return ret;
 }
@@ -383,9 +434,13 @@ cr_xml_parse_filelists_snippet(const char *xml_string,
                                void *warningcb_data,
                                GError **err)
 {
-    char* wrapped_xml_string = g_strconcat("<filelists>", xml_string, "</filelists>", NULL);
+    // This function can parse filelists and filelists-ext.  The state
+    // machine do not track if the wrapped XML is one or another, so
+    // is safe for a filelists-ext snipped to be surrounded by
+    // <filelists>
+    gchar* wrapped_xml_string = g_strconcat("<filelists>", xml_string, "</filelists>", NULL);
     int ret = cr_xml_parse_filelists_internal(wrapped_xml_string, newpkgcb, newpkgcb_data, pkgcb, pkgcb_data,
                                               warningcb, warningcb_data, &cr_xml_parser_generic_from_string, err);
-    free(wrapped_xml_string);
+    g_free(wrapped_xml_string);
     return ret;
 }

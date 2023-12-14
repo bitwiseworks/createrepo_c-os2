@@ -54,6 +54,7 @@ cr_compressiontask_new(const char *src,
     if (!task) {
         g_set_error(err, ERR_DOMAIN, CRE_MEMORY,
                    "Cannot allocate memory");
+        cr_contentstat_free(stat, NULL);
         return NULL;
     }
 
@@ -130,7 +131,7 @@ cr_rewrite_pkg_count_thread(gpointer data, gpointer user_data)
     cr_rewrite_header_package_count(task->src,
                                     task->type,
                                     ud->package_count,
-                                    ud->task_count,
+                                    ud->task_count - ud->skipped_count,
                                     task->stat,
                                     task->zck_dict_dir,
                                     &tmp_err);
@@ -165,6 +166,9 @@ cr_repomdrecordfilltask_free(cr_RepomdRecordFillTask *task,
                              GError **err)
 {
     assert(!err || *err == NULL);
+
+    if (!task)
+        return;
 
     if (task->err)
         g_error_free(task->err);
