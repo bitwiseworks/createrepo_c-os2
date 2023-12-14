@@ -56,6 +56,15 @@ TARGET_LINK_LIBRARIES(_createrepo_c libcreaterepo_c)
 TARGET_LINK_LIBRARIES(_createrepo_c
                         ${CURL_LIBRARY}
                      )
+if(OS2)
+    SET_TARGET_PROPERTIES(_createrepo_c PROPERTIES
+        OS2_DEF_VENDOR "$ENV{VENDOR}"
+        OS2_DEF_PATCH "${CR_PATCH}"
+        OS2_DEF_VERSION "${VERSION}"
+        TARGET_SHORT _crtrepo)
+    ADD_CUSTOM_TARGET(_createrepo_c_sym ALL WORKING_DIRECTORY "./createrepo_c"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink _crtrepo.dll _createrepo_c.pyd)
+endif()
 
 IF (SKBUILD)
     find_package(PythonExtensions REQUIRED)
@@ -77,4 +86,7 @@ ELSE ()
 
     # Version has to be passed as last argument.
     INSTALL(CODE "EXECUTE_PROCESS(COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/utils/setup_for_python_metadata.py install_egg_info --install-dir \$ENV{DESTDIR}/${PYTHON_INSTALL_DIR} ${VERSION})")
+    IF(OS2)
+      INSTALL(FILES createrepo_c/_createrepo_c.pyd DESTINATION ${PYTHON_INSTALL_DIR}/createrepo_c)
+    ENDIF()
 ENDIF ()
