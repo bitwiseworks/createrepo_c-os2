@@ -838,6 +838,8 @@ cr_remove_dir_cb(const char *fpath,
                  G_GNUC_UNUSED struct FTW *ftwbuf)
 {
     int rv = remove(fpath);
+    if (rv && errno == EISDIR)
+        rv = rmdir(fpath);
     if (rv)
         g_warning("%s: Cannot remove: %s: %s", __func__, fpath, g_strerror(errno));
 
