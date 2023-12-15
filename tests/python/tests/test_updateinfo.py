@@ -420,4 +420,4 @@ class TestCaseUpdateInfo(unittest.TestCase):
     </pkglist>
   </update>
 </updates>
-""" % {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "now_epoch": now.strftime('%s')})
+""" % {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "now_epoch": int(now.timestamp())})
