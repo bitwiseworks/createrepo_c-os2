@@ -4,7 +4,9 @@
 
 %global bash_completion %{_datadir}/bash-completion/completions/*
 
-%if ( 0%{?rhel} && ( 0%{?rhel} <= 7 || 0%{?rhel} >= 9 ) ) || ( 0%{?fedora} && 0%{?fedora} >= 39 )
+# Fedora infrastructure needs it for producing Fedora ≤ 39 and EPEL ≤ 7 repositories
+# See https://github.com/rpm-software-management/createrepo_c/issues/398
+%if ( 0%{?rhel} && ( 0%{?rhel} <= 7 || 0%{?rhel} >= 9 ) ) || ( 0%{?fedora} && 0%{?fedora} >= 45 )
 %bcond_with drpm
 %else
 %bcond_without drpm
@@ -30,13 +32,21 @@
 
 %bcond_with sanitizers
 
+%if %{defined gitrev}
+%define package_version %{?gitrev}
+%else
+%define package_version 1.2.1
+%endif
+
 Summary:        Creates a common metadata repository
 Name:           createrepo_c
-Version:        1.0.2
+Version:        %{package_version}
 Release:        1%{?dist}
 License:        GPL-2.0-or-later
 URL:            https://github.com/rpm-software-management/createrepo_c
 Source0:        %{url}/archive/%{version}/%{name}-%{version}.tar.gz
+
+%global epoch_dep %{?epoch:%{epoch}:}
 
 BuildRequires:  cmake
 BuildRequires:  gcc
@@ -47,7 +57,7 @@ BuildRequires:  libcurl-devel
 BuildRequires:  libxml2-devel
 BuildRequires:  openssl-devel
 BuildRequires:  rpm-devel >= 4.8.0-28
-BuildRequires:  sqlite-devel
+BuildRequires:  sqlite-devel >= 3.6.18
 BuildRequires:  xz
 BuildRequires:  xz-devel
 BuildRequires:  zlib-devel
@@ -65,8 +75,12 @@ BuildRequires:  libmodulemd
 Requires:       libmodulemd%{?_isa} >= %{libmodulemd_version}
 %endif
 %endif
-Requires:       %{name}-libs =  %{version}-%{release}
+Requires:       %{name}-libs = %{epoch_dep}%{version}-%{release}
+%if 0%{?fedora} > 40 || 0%{?rhel} > 10
+BuildRequires:  bash-completion-devel
+%else
 BuildRequires:  bash-completion
+%endif
 Requires: rpm >= 4.9.0
 %if %{with drpm}
 BuildRequires:  drpm-devel >= 0.4.0
@@ -82,7 +96,7 @@ BuildRequires:  libubsan
 
 %if 0%{?fedora} || 0%{?rhel} > 7
 Obsoletes:      createrepo < 0.11.0
-Provides:       createrepo = %{version}-%{release}
+Provides:       createrepo = %{epoch_dep}%{version}-%{release}
 %endif
 
 %description
@@ -100,7 +114,7 @@ for easy manipulation with a repodata.
 
 %package devel
 Summary:    Library for repodata manipulation
-Requires:   %{name}-libs%{?_isa} = %{version}-%{release}
+Requires:   %{name}-libs%{?_isa} = %{epoch_dep}%{version}-%{release}
 
 %description devel
 This package contains the createrepo_c C library and header files.
@@ -112,14 +126,14 @@ Summary:        Python 3 bindings for the createrepo_c library
 BuildRequires:  python3-devel
 BuildRequires:  python3-setuptools
 BuildRequires:  python3-sphinx
-Requires:       %{name}-libs = %{version}-%{release}
+Requires:       %{name}-libs = %{epoch_dep}%{version}-%{release}
 
 %description -n python3-%{name}
 Python 3 bindings for the createrepo_c library.
 
 %prep
 %autosetup -p1
-
+%py3_shebang_fix examples/python
 mkdir build-py3
 
 %build
@@ -194,7 +208,8 @@ ln -sr %{buildroot}%{_bindir}/modifyrepo_c %{buildroot}%{_bindir}/modifyrepo
 %{_includedir}/%{name}/
 
 %files -n python3-%{name}
+%doc examples/python/*
 %{python3_sitearch}/%{name}/
-%{python3_sitearch}/%{name}-%{version}-py%{python3_version}.egg-info
+%{python3_sitearch}/%{name}-*-py%{python3_version}.egg-info
 
 %changelog

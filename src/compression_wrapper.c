@@ -118,7 +118,16 @@ typedef struct {
     unsigned char buffer[XZ_BUFFER_SIZE];
 } XzFile;
 
-#define CR_CW_ZSTD_COMPRESSION_LEVEL    9
+
+/** level 10 or 11 are good choices for the XML files that we generate.
+ * level 10 requires ~ 18% more time with 1% saving over level 9
+ * level 11 requires ~ 50% more time with 1.5% saving over level 9
+ * level 12 requires ~ 65% more time with 1.5% saving over level 9
+ * level 13 requires ~ 260% more time with 1.55% saving over level 9
+*/
+
+#define CR_CW_ZSTD_COMPRESSION_LEVEL    10
+
 typedef struct {
     void *buffer;
     size_t buffer_size;
@@ -181,13 +190,13 @@ cr_detect_compression(const char *filename, GError **err)
     }
 
     size_t bytesRead = fread(magic, 1, sizeof(magic), file);
+    fclose(file);
     if (bytesRead != sizeof(magic)) {
         // Assume that if there's less than 5 bytes in the file, it's uncompressed
         g_debug("%s: Unable to read bytes from file for magic number detection, assuming uncompressed (%s)",
             __func__, filename);
         return CR_CW_NO_COMPRESSION;
     }
-    fclose(file);
 
     if (!memcmp(magic, "\x1F\x8B", 2)) {
         return CR_CW_GZ_COMPRESSION;
@@ -636,7 +645,9 @@ cr_sopen(const char *filename,
             zckCtx *zck = file->FILE;
             if (mode == CR_CW_MODE_WRITE) {
                 if (!file->FILE || !zck_init_write(zck, fd) ||
-                   !zck_set_ioption(zck, ZCK_MANUAL_CHUNK, 1)) {
+                   !zck_set_ioption(zck, ZCK_MANUAL_CHUNK, 1) ||
+                   !zck_set_ioption(zck, ZCK_COMP_TYPE, ZCK_COMP_ZSTD) ||
+                   !zck_set_ioption(zck, ZCK_ZSTD_COMP_LEVEL, CR_CW_ZSTD_COMPRESSION_LEVEL)) {
                     zck_set_log_fd(STDOUT_FILENO);
                     g_set_error(err, ERR_DOMAIN, CRE_IO, "%s",
                                 zck_get_error(zck));

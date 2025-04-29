@@ -15,6 +15,8 @@ with open('VERSION.cmake', 'r+') as version_file:
 setup(
     name='createrepo_c',
     description='C implementation of createrepo',
+    long_description='C implementation of createrepo',
+    long_description_content_type='text/markdown',
     version=version,
     license='GPLv2+',
     author='RPM Software Management',
@@ -44,7 +46,6 @@ setup(
         '-DENABLE_BASHCOMP:BOOL=OFF',
         '-DENABLE_DRPM:BOOL=OFF',
         '-DWITH_ZCHUNK:BOOL=OFF',
-        '-DWITH_LEGACY_HASHES:BOOL=ON',
     ],
     cmake_languages=['C'],
     entry_points={

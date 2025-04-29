@@ -3,7 +3,6 @@
 PACKAGE="createrepo_c"
 RPMBUILD_DIR="${HOME}/rpmbuild/"
 BUILD_DIR="$RPMBUILD_DIR/BUILD"
-GITREV=`git rev-parse --short HEAD`
 PREFIX=""   # Root project dir
 MY_DIR=`dirname "$0"`
 
@@ -22,6 +21,13 @@ if [ ! -d "$RPMBUILD_DIR" ]; then
     exit 1
 fi
 
+if [ $# -gt "1" ]
+then
+    GITREV=$2
+else
+    GITREV=`git rev-parse --short HEAD`
+fi
+
 echo "Generating rpm for $GITREV"
 
 echo "Cleaning $BUILD_DIR"
@@ -38,23 +44,22 @@ fi
 echo "Tarball done"
 
 echo "> Copying tarball and .spec file into the $RPMBUILD_DIR .."
-cp "$PREFIX/$PACKAGE-$GITREV.tar.xz" "$RPMBUILD_DIR/SOURCES/"
+cp "$PREFIX/$PACKAGE-$GITREV.tar.gz" "$RPMBUILD_DIR/SOURCES/"
 if [ ! $? == "0" ]; then
-    echo "Error while: cp $PREFIX/$PACKAGE-$GITREV.tar.xz $RPMBUILD_DIR/SOURCES/"
+    echo "Error while: cp $PREFIX/$PACKAGE-$GITREV.tar.gz $RPMBUILD_DIR/SOURCES/"
     exit 1
 fi
 
-# Copy via sed
-sed -i "s/%global gitrev .*/%global gitrev $GITREV/g" "$PREFIX/$PACKAGE.spec"
-sed "s/%global gitrev .*/%global gitrev $GITREV/g" "$PREFIX/$PACKAGE.spec" > "$RPMBUILD_DIR/SPECS/$PACKAGE.spec"
+cp "$PREFIX/$PACKAGE.spec" "$RPMBUILD_DIR/SPECS/"
 if [ ! $? == "0" ]; then
     echo "Error while: cp $PREFIX/$PACKAGE.spec $RPMBUILD_DIR/SPECS/"
     exit 1
 fi
+
 echo "Copying done"
 
 echo "> Starting rpmbuild $PACKAGE.."
-rpmbuild -ba "$RPMBUILD_DIR/SPECS/$PACKAGE.spec"
+rpmbuild -ba --define "gitrev $GITREV" "$RPMBUILD_DIR/SPECS/$PACKAGE.spec"
 if [ ! $? == "0" ]; then
     echo "Error while: rpmbuild -ba $RPMBUILD_DIR/SPECS/$PACKAGE.spec"
     exit 1

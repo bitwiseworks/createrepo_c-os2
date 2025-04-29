@@ -37,6 +37,7 @@
 #define DEFAULT_UNIQUE_MD_FILENAMES     TRUE
 #define DEFAULT_IGNORE_LOCK             FALSE
 #define DEFAULT_LOCAL_SQLITE            FALSE
+#define DEFAULT_FORMAT_PRETTY           TRUE
 
 struct CmdOptions _cmd_options = {
         .changelog_limit            = DEFAULT_CHANGELOG_LIMIT,
@@ -54,7 +55,7 @@ struct CmdOptions _cmd_options = {
         .cut_dirs                   = 0,
         .location_prefix            = NULL,
         .repomd_checksum            = NULL,
-
+        .pretty                     = DEFAULT_FORMAT_PRETTY,
         .deltas                     = FALSE,
         .oldpackagedirs             = NULL,
         .num_deltas                 = 1,
@@ -115,8 +116,10 @@ static GOptionEntry cmd_entries[] =
       "metadata. The default is now \"sha256\".", "CHECKSUM_TYPE" },
     { "pretty", 'p', 0, G_OPTION_ARG_NONE, &(_cmd_options.pretty),
       "Make sure all xml generated is formatted (default)", NULL },
+    { "no-pretty", 0, G_OPTION_FLAG_REVERSE, G_OPTION_ARG_NONE, &(_cmd_options.pretty),
+      "No extra indentation in generated xml", NULL },
     { "database", 'd', 0, G_OPTION_ARG_NONE, &(_cmd_options.database),
-      "Generate sqlite databases for use with yum.", NULL },
+      "DEPRECATED: Generate sqlite databases for use with yum.", NULL },
     { "no-database", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.no_database),
       "Do not generate sqlite databases in the repository (default).", NULL },
     { "filelists-ext", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.filelists_ext),
@@ -179,16 +182,20 @@ static GOptionEntry cmd_entries[] =
       "Number of workers to spawn to read rpms.", NULL },
     { "xz", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.xz_compression),
       "Use xz for repodata compression.", NULL },
-    { "compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.compress_type),
-      "Which compression type to use for additional metadata files (comps, updateinfo, etc). Supported compressions are: bzip2, gzip, zck, zstd, xz.", "COMPRESSION_TYPE" },
-    { "general-compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.general_compress_type),
-      "Which compression type to use (even for primary, filelists and other xml). Supported compressions are: bzip2, gzip, zck, zstd, xz.",
-      "COMPRESSION_TYPE" },
 #ifdef WITH_ZCHUNK
+    { "compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.compress_type),
+      "Which compression type to use for additional metadata files (comps, updateinfo, etc). Supported values are: bz2, gz, zck, zstd, xz.", "COMPRESSION_TYPE" },
+    { "general-compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.general_compress_type),
+      "Which compression type to use (even for primary, filelists and other xml). Supported values are: bz2, gz, zck, zstd, xz.", "COMPRESSION_TYPE" },
     { "zck", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.zck_compression),
       "Generate zchunk files as well as the standard repodata.", NULL },
     { "zck-dict-dir", 0, 0, G_OPTION_ARG_FILENAME, &(_cmd_options.zck_dict_dir),
       "Directory containing compression dictionaries for use by zchunk", "ZCK_DICT_DIR" },
+#else
+    { "compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.compress_type),
+      "Which compression type to use for additional metadata files (comps, updateinfo, etc). Supported values are: bz2, gz, zstd, xz.", "COMPRESSION_TYPE" },
+    { "general-compress-type", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.general_compress_type),
+      "Which compression type to use (even for primary, filelists and other xml). Supported values are: bz2, gz, zstd, xz.", "COMPRESSION_TYPE" },
 #endif
     { "keep-all-metadata", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.keep_all_metadata),
       "Keep all additional metadata (not primary, filelists and other xml or sqlite files, "
@@ -197,7 +204,7 @@ static GOptionEntry cmd_entries[] =
       "Discard all additional metadata (not primary, filelists and other xml or sqlite files, "
       "nor their compressed variants) from source repository during update.", NULL },
     { "compatibility", 0, 0, G_OPTION_ARG_NONE, &(_cmd_options.compatibility),
-      "Enforce maximal compatibility with classical createrepo (Affects only: --retain-old-md).", NULL },
+      "Enforce maximal compatibility with classical createrepo and yum (Changes --retain-old-md behavior, defaults to Gzip for compression, produces sqlite metadata by default, leaves group metadata uncompressed).", NULL },
     { "retain-old-md-by-age", 0, 0, G_OPTION_ARG_STRING, &(_cmd_options.retain_old_md_by_age),
       "During --update, remove all files in repodata/ which are older "
       "then the specified period of time. (e.g. '2h', '30d', ...). "
@@ -315,6 +322,10 @@ check_and_set_compression_type(const char *type_str,
         *type = CR_CW_BZ2_COMPRESSION;
     } else if (!strcmp(compress_str->str, "xz")) {
         *type = CR_CW_XZ_COMPRESSION;
+#ifdef WITH_ZCHUNK
+    } else if (!strcmp(compress_str->str, "zck")) {
+        *type = CR_CW_ZCK_COMPRESSION;
+#endif
     } else if (!strcmp(compress_str->str, "zstd")) {
         *type = CR_CW_ZSTD_COMPRESSION;
     } else {
@@ -642,6 +653,14 @@ check_arguments(struct CmdOptions *options,
                     "Cannot use --zck-dict-dir without setting --zck");
         return FALSE;
     }
+
+    // Zchunk options
+    if (options->general_compression_type == CR_CW_ZCK_COMPRESSION && options->zck_compression) {
+        g_set_error(err, ERR_DOMAIN, CRE_BADARG,
+                    "Cannot use --general-compress-type=zck with --zck");
+        return FALSE;
+    }
+
     if (options->zck_dict_dir)
         options->zck_dict_dir = cr_normalize_dir_path(options->zck_dict_dir);
 

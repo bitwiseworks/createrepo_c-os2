@@ -85,9 +85,12 @@ Choose the checksum type used in repomd.xml and for packages in the metadata. Th
 .SS \-p \-\-pretty
 .sp
 Make sure all xml generated is formatted (default)
+.SS \-p \-\-no\-pretty
+.sp
+Minify the generated xml content. On average this reduces compressed size by 2%.
 .SS \-d \-\-database
 .sp
-Generate sqlite databases for use with yum.
+DEPRECATED: Generate sqlite databases for use with yum.
 .SS \-\-no\-database
 .sp
 Do not generate sqlite databases in the repository.
@@ -161,7 +164,7 @@ Number of workers to spawn to read rpms.
 Use xz for repodata compression.
 .SS \-\-compress\-type COMPRESSION_TYPE
 .sp
-Which compression type to use. Supported compressions are: bzip2, gzip, zck, zstd, xz.
+Which compression type to use. Supported compressions are: bz2, gz, zck, zstd, xz.
 .SS \-\-general\-compress\-type COMPRESSION_TYPE
 .sp
 Which compression type to use (even for primary, filelists and other xml).
@@ -179,7 +182,7 @@ Keep all additional metadata (not primary, filelists and other xml or sqlite fil
 Discard all additional metadata (not primary, filelists and other xml or sqlite files, nor their compressed variants) from source repository during update.
 .SS \-\-compatibility
 .sp
-Enforce maximal compatibility with classical createrepo (Affects only: \-\-retain\-old\-md).
+Enforce maximal compatibility with classical createrepo (Changes \-\-retain\-old\-md behavior, defaults to Gzip for compression).
 .SS \-\-retain\-old\-md\-by\-age AGE
 .sp
 During \-\-update, remove all files in repodata/ which are older then the specified period of time. (e.g. \(aq2h\(aq, \(aq30d\(aq, ...). Available units (m \- minutes, h \- hours, d \- days)

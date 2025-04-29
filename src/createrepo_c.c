@@ -740,6 +740,7 @@ main(int argc, char **argv)
     // Init package parser
     cr_package_parser_init();
     cr_xml_dump_init();
+    cr_xml_dump_set_parameter(CR_XML_DUMP_DO_PRETTY_PRINT, cmd_options->pretty);
 
     // Thread pool - Creation
     struct UserData user_data = {0};
@@ -834,6 +835,11 @@ main(int argc, char **argv)
     cr_CompressionType sqlite_compression = CR_CW_BZ2_COMPRESSION;
     cr_CompressionType compression = CR_CW_ZSTD_COMPRESSION;
 
+    if (cmd_options->compatibility) {
+        xml_compression    = CR_CW_GZ_COMPRESSION;
+        compression        = CR_CW_GZ_COMPRESSION;
+    }
+
     if (cmd_options->compression_type != CR_CW_UNKNOWN_COMPRESSION) {
         sqlite_compression = cmd_options->compression_type;
         compression        = cmd_options->compression_type;
@@ -851,7 +857,12 @@ main(int argc, char **argv)
 
     // Groupfile specified as argument
     if (cmd_options->groupfile_fullpath) {
-        gchar *compressed_path = cr_compress_groupfile(cmd_options->groupfile_fullpath, tmp_out_repo, compression);
+        cr_CompressionType group_compression = compression;
+        // Skip compressing the group metadata when using --compatibility flag
+        if (cmd_options->compatibility) {
+            group_compression = CR_CW_NO_COMPRESSION;
+        }
+        gchar *compressed_path = cr_compress_groupfile(cmd_options->groupfile_fullpath, tmp_out_repo, group_compression);
         cr_Metadatum *new_groupfile_metadatum = g_malloc0(sizeof(cr_Metadatum));
         new_groupfile_metadatum->name = compressed_path;
         new_groupfile_metadatum->type = g_strdup("group");
@@ -1141,7 +1152,9 @@ main(int argc, char **argv)
     cr_SqliteDb *fex_db = NULL;
     cr_SqliteDb *oth_db = NULL;
 
-    if (cmd_options->database) {
+    gboolean should_create_databases = cmd_options->database || (cmd_options->compatibility && !cmd_options->no_database);
+
+    if (should_create_databases) {
         _cleanup_file_close_ int pri_db_fd = -1;
         _cleanup_file_close_ int fil_db_fd = -1;
         _cleanup_file_close_ int fex_db_fd = -1;
@@ -1156,7 +1169,7 @@ main(int argc, char **argv)
                 fex_db_filename = g_strconcat(tmp_out_repo, "/filelists-ext.sqlite", NULL);
             oth_db_filename = g_strconcat(tmp_out_repo, "/other.sqlite", NULL);
         } else {
-            g_debug("Creating databases localy");
+            g_debug("Creating databases locally");
             const gchar *tmpdir = g_get_tmp_dir();
             pri_db_filename = g_build_filename(tmpdir, "primary.XXXXXX.sqlite", NULL);
             fil_db_filename = g_build_filename(tmpdir, "filelists.XXXXXX.sqlite", NULL);
@@ -1448,11 +1461,7 @@ main(int argc, char **argv)
     user_data.fil_zck           = fil_cr_zck;
     user_data.fex_zck           = fex_cr_zck;
     user_data.oth_zck           = oth_cr_zck;
-    if (cmd_options->compatibility && cmd_options->changelog_limit == DEFAULT_CHANGELOG_LIMIT ) {
-      user_data.changelog_limit = -1;
-    } else {
-      user_data.changelog_limit = cmd_options->changelog_limit;
-    }
+    user_data.changelog_limit = cmd_options->changelog_limit;
     user_data.location_base     = cmd_options->location_base;
     user_data.checksum_type_str = cr_checksum_name_str(cmd_options->checksum_type);
     user_data.checksum_type     = cmd_options->checksum_type;
@@ -1828,8 +1837,7 @@ main(int argc, char **argv)
     cr_repomdrecordfilltask_free(oth_fill_task, NULL);
 
     // Sqlite db
-    if (cmd_options->database) {
-
+    if (should_create_databases) {
         gchar *pri_db_name = g_strconcat(tmp_out_repo, "/primary.sqlite",
                                          sqlite_compression_suffix, NULL);
         gchar *fil_db_name = g_strconcat(tmp_out_repo, "/filelists.sqlite",
